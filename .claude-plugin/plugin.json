@@ -1,0 +1,37 @@
+{
+  "name": "simple-memory",
+  "version": "0.1.0",
+  "description": "A local markdown knowledge base with keyword hints on every prompt, note tools, and a band of suggested and read notes.",
+  "author": {
+    "name": "EnyMan"
+  },
+  "repository": "https://github.com/EnyMan/simple-memory",
+  "license": "MIT",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "directory": {
+      "type": "string",
+      "title": "Memory directory",
+      "description": "Where the notes live. Absolute, ~/..., or relative to the project directory.",
+      "default": "~/simple-memory"
+    },
+    "maxHints": {
+      "type": "number",
+      "title": "Hints per prompt",
+      "description": "The most notes suggested for one prompt.",
+      "default": 5
+    },
+    "recentNotes": {
+      "type": "number",
+      "title": "Recent notes at session start",
+      "description": "How many recently updated notes are listed in the session's opening context.",
+      "default": 10
+    },
+    "extraStopwords": {
+      "type": "string",
+      "title": "Extra stopwords",
+      "description": "Comma- or space-separated words never used as keywords (for example words of another language).",
+      "default": ""
+    }
+  }
+}
