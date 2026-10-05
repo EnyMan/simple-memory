@@ -4,7 +4,7 @@ import type { FsEntry, Register } from 'claude-code'
 import type { NoteRef } from '../types'
 import { keywords, parseStopwords, relevant, score, terms } from './keywords'
 import type { Indexed } from './keywords'
-import { findReplace, idOf, parse, replaceSection, safeRelative, serialize, slugify, snippet, tidyTags } from './notes'
+import { findReplace, idOf, linksTo, parse, relink, replaceSection, safeRelative, serialize, slugify, snippet, tidyTags } from './notes'
 import type { Parsed } from './notes'
 
 
@@ -44,7 +44,16 @@ type Io = {
   cwd: () => Promise<string>
   markRead: (refs: readonly NoteRef[]) => Promise<void>
   invalidateContext: () => void
+  /** Deletes a file. */
+  remove: (path: string) => Promise<void>
+  /** Drops a note from this conversation's suggested and read lists. */
+  forget: (id: string) => Promise<void>
+  /** Renames a note in this conversation's suggested and read lists. */
+  rename: (from: string, to: NoteRef) => Promise<void>
 }
+
+const renameIn = (list: readonly NoteRef[], from: string, to: NoteRef) =>
+  list.map(one => (one.id === from ? to : one))
 
 const merge = (list: readonly NoteRef[], refs: readonly NoteRef[]) => [
   ...list.filter(one => !refs.some(ref => ref.id === one.id)),
@@ -180,6 +189,8 @@ export const register: Register = (on, options) => {
       `- ${TOOL('read_note')}: read one or more notes by id, path or title.`,
       `- ${TOOL('write_note')}: create a note (title, folder, content, tags).`,
       `- ${TOOL('edit_note')}: append, prepend, find/replace, or replace a section of a note.`,
+      `- ${TOOL('move_note')}: move or rename a note; links to it are updated.`,
+      `- ${TOOL('delete_note')}: delete a note (only when the user asks or agrees).`,
       '',
       'Rules:',
       '- On each prompt a keyword match may add a <simple-memory-hint> listing notes not yet suggested. Read the ones that plausibly matter before answering; ignore the rest silently.',
@@ -293,6 +304,32 @@ export const register: Register = (on, options) => {
           tags: { type: 'array', items: { type: 'string' }, description: 'The new full tag list.' },
         },
         required: ['note', 'operation'],
+      },
+    },
+    {
+      name: 'move_note',
+      description:
+        'Move or rename a note of the simple-memory knowledge base. destination is a folder ("archive/", keeps the file name) or a new note id ("projects/new-name"). [[links]] to the note in other notes are updated. title, when given, also retitles it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          note: { type: 'string', description: 'The note: id, path or title.' },
+          destination: { type: 'string', description: 'A folder ending in "/", or the new id.' },
+          title: { type: 'string', description: 'A new title.' },
+        },
+        required: ['note', 'destination'],
+      },
+    },
+    {
+      name: 'delete_note',
+      description:
+        'Delete a note from the simple-memory knowledge base, permanently. Only when the user asked for it or confirmed it. Reports notes that still link to it.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          note: { type: 'string', description: 'The note: id, path or title.' },
+        },
+        required: ['note'],
       },
     },
     {
@@ -443,6 +480,62 @@ export const register: Register = (on, options) => {
     return answer(`Updated ${note.id}.`)
   }
 
+  const moveNote = async (io: Io, args: Args) => {
+    const root = await rootOf(io)
+    const notes = await index(io, root)
+    const note = find(notes, str(args.note), root)
+    if (!note) return refuse(`no note "${str(args.note)}". Search for it first.`)
+
+    const raw = str(args.destination).trim().replace(/\\/g, '/')
+    const isFolder =
+      raw === '' || raw.endsWith('/') || (!/\.md$/i.test(raw) && (await io.exists(`${root}/${raw}`)))
+    const target = safeRelative(raw.replace(/\.md$/i, ''))
+    if (target === undefined) return refuse('destination must be a relative path inside the memory root.')
+    const fileName = note.rel.split('/').pop() ?? `${slugify(note.title)}.md`
+    const rel = isFolder ? `${target ? `${target}/` : ''}${fileName}` : `${target}.md`
+    if (rel === note.rel && str(args.title).trim() === '') return refuse('the note is already there.')
+    if (rel !== note.rel && (await io.exists(`${root}/${rel}`))) return refuse(`${idOf(rel)} already exists.`)
+
+    const parsed = parse(await io.read(note.abs), note.title)
+    const title = str(args.title).trim() || parsed.meta.title
+    const id = idOf(rel)
+    await saveNote(io, root, rel, { meta: { ...parsed.meta, title, updated: await nowIso(io) }, body: parsed.body })
+    if (rel !== note.rel) {
+      await io.remove(note.abs)
+      cache.delete(note.abs)
+    }
+
+    const relinked: string[] = []
+    if (id !== note.id) {
+      for (const other of notes) {
+        if (other.abs === note.abs || !linksTo(other.body, note.id)) continue
+        const text = await io.read(other.abs).catch(() => undefined)
+        if (text === undefined) continue
+        await io.write(other.abs, relink(text, note.id, id))
+        cache.delete(other.abs)
+        relinked.push(other.id)
+      }
+    }
+    await io.rename(note.id, { id, title })
+    return answer(
+      `Moved ${note.id} to ${id}.${relinked.length > 0 ? ` Updated links in: ${relinked.join(', ')}.` : ''}`,
+    )
+  }
+
+  const deleteNote = async (io: Io, args: Args) => {
+    const root = await rootOf(io)
+    const notes = await index(io, root)
+    const note = find(notes, str(args.note), root)
+    if (!note) return refuse(`no note "${str(args.note)}". Search for it first.`)
+    await io.remove(note.abs)
+    cache.delete(note.abs)
+    await io.forget(note.id)
+    const linking = notes.filter(other => other.abs !== note.abs && linksTo(other.body, note.id)).map(other => other.id)
+    return answer(
+      `Deleted ${note.id}.${linking.length > 0 ? ` These notes still link to it: ${linking.join(', ')}.` : ''}`,
+    )
+  }
+
   const initMemory = async (io: Io, args: Args) => {
     const root = await rootOf(io)
     const folders = (Array.isArray(args.folders) ? args.folders : [])
@@ -488,6 +581,8 @@ export const register: Register = (on, options) => {
     [TOOL('read_note')]: readNote,
     [TOOL('write_note')]: writeNote,
     [TOOL('edit_note')]: editNote,
+    [TOOL('move_note')]: moveNote,
+    [TOOL('delete_note')]: deleteNote,
     [TOOL('init_memory')]: initMemory,
   }
 
@@ -524,6 +619,20 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
+      remove: async path => {
+        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
+        if (ran?.exitCode === 0) return
+        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
+        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
+      },
+      forget: async id => {
+        await update($, suggested, list => list.filter(one => one.id !== id))
+        await update($, readNotes, list => list.filter(one => one.id !== id))
+      },
+      rename: async (from, to) => {
+        await update($, suggested, list => renameIn(list, from, to))
+        await update($, readNotes, list => renameIn(list, from, to))
+      },
     }
     try {
       return await handler(io, e as unknown as Args)
@@ -545,6 +654,20 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
+      remove: async path => {
+        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
+        if (ran?.exitCode === 0) return
+        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
+        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
+      },
+      forget: async id => {
+        await update($, suggested, list => list.filter(one => one.id !== id))
+        await update($, readNotes, list => list.filter(one => one.id !== id))
+      },
+      rename: async (from, to) => {
+        await update($, suggested, list => renameIn(list, from, to))
+        await update($, readNotes, list => renameIn(list, from, to))
+      },
     }
     const root = await rootOf(io)
     if (ran.deny === undefined && !ran.isError && e.file_path.startsWith(`${root}/`) && /\.md$/i.test(e.file_path)) {
@@ -565,6 +688,20 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
+      remove: async path => {
+        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
+        if (ran?.exitCode === 0) return
+        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
+        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
+      },
+      forget: async id => {
+        await update($, suggested, list => list.filter(one => one.id !== id))
+        await update($, readNotes, list => list.filter(one => one.id !== id))
+      },
+      rename: async (from, to) => {
+        await update($, suggested, list => renameIn(list, from, to))
+        await update($, readNotes, list => renameIn(list, from, to))
+      },
     }
     const root = await rootOf(io)
     const existing = await io.read(`${root}/${GUIDE}`).catch(() => undefined)
@@ -587,6 +724,20 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
+      remove: async path => {
+        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
+        if (ran?.exitCode === 0) return
+        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
+        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
+      },
+      forget: async id => {
+        await update($, suggested, list => list.filter(one => one.id !== id))
+        await update($, readNotes, list => list.filter(one => one.id !== id))
+      },
+      rename: async (from, to) => {
+        await update($, suggested, list => renameIn(list, from, to))
+        await update($, readNotes, list => renameIn(list, from, to))
+      },
     }
     const text = await openingContext(io).catch(() => undefined)
     if (text === undefined) return result
@@ -610,6 +761,20 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
+      remove: async path => {
+        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
+        if (ran?.exitCode === 0) return
+        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
+        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
+      },
+      forget: async id => {
+        await update($, suggested, list => list.filter(one => one.id !== id))
+        await update($, readNotes, list => list.filter(one => one.id !== id))
+      },
+      rename: async (from, to) => {
+        await update($, suggested, list => renameIn(list, from, to))
+        await update($, readNotes, list => renameIn(list, from, to))
+      },
     }
     const root = await rootOf(io)
     const notes = await index(io, root).catch(() => [])

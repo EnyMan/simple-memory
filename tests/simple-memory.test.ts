@@ -55,6 +55,13 @@ const memoryFs = (on: On, files: Record<string, string> = {}) => {
       })),
     }
   })
+  on('process.run', ($, e) => {
+    const [command, , , path] = e.argv
+    const isRemoved = command === 'rm' && path !== undefined && store.delete(path)
+    return {
+      value: { exitCode: isRemoved ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
   return store
 }
 
@@ -64,7 +71,8 @@ const NOTES = {
     '---\ntitle: Use Postgres for storage\ntags: [database, backend]\n---\n\nWe chose Postgres over MySQL for JSONB support.\n',
   [`${ROOT}/how-to/deploy-backend.md`]:
     '---\ntitle: Deploy the backend\ntags: [ops]\n---\n\nRun the deploy pipeline from main.\n',
-  [`${ROOT}/people/jane.md`]: '---\ntitle: Jane Doe\n---\n\nOwns the billing service.\n',
+  [`${ROOT}/people/jane.md`]:
+    '---\ntitle: Jane Doe\n---\n\nOwns the billing service. Agreed on [[decisions/use-postgres|Postgres]].\n',
 }
 
 describe('keywords', () => {
@@ -206,5 +214,53 @@ describe('plugin', () => {
     await clock.advance(1)
     expect(prompts[0]).toContain('What I have in mind: a shared team wiki')
     expect(prompts[0]).toContain('mcp__simple-memory__init_memory')
+  })
+
+  test('move a note and relink, then delete it', OPTIONS, async ($, on) => {
+    const files = memoryFs(on, NOTES)
+    mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+
+    await $.tool.call({ tool: 'mcp__simple-memory__read_note', notes: ['decisions/use-postgres'] })
+    const moved = await $.tool.call({
+      tool: 'mcp__simple-memory__move_note',
+      note: 'Use Postgres for storage',
+      destination: 'archive/',
+    })
+    expect(String(moved.result)).toContain('Moved decisions/use-postgres to archive/use-postgres')
+    expect(String(moved.result)).toContain('people/jane')
+    expect(files.has(`${ROOT}/decisions/use-postgres.md`)).toBe(false)
+    expect(files.get(`${ROOT}/archive/use-postgres.md`)).toContain('JSONB')
+    expect(files.get(`${ROOT}/people/jane.md`)).toContain('[[archive/use-postgres|Postgres]]')
+
+    const renamed = await $.tool.call({
+      tool: 'mcp__simple-memory__move_note',
+      note: 'archive/use-postgres',
+      destination: 'archive/postgres',
+      title: 'Postgres',
+    })
+    expect(String(renamed.result)).toContain('to archive/postgres')
+    expect(files.get(`${ROOT}/archive/postgres.md`)).toContain('title: Postgres')
+
+    const clash = await $.tool.call({
+      tool: 'mcp__simple-memory__move_note',
+      note: 'archive/postgres',
+      destination: 'people/jane',
+    })
+    expect(String(clash.result)).toContain('already exists')
+
+    const ui = await $.ui.mount({ plugin: 'simple-memory', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ key: 'read:archive/postgres' })).toBeDefined()
+    await ui.unmount()
+
+    const deleted = await $.tool.call({ tool: 'mcp__simple-memory__delete_note', note: 'archive/postgres' })
+    expect(String(deleted.result)).toContain('Deleted archive/postgres')
+    expect(String(deleted.result)).toContain('still link to it: people/jane')
+    expect(files.has(`${ROOT}/archive/postgres.md`)).toBe(false)
+
+    await $.tool.call({ tool: 'mcp__simple-memory__read_note', notes: ['people/jane'] })
+    const after = await $.ui.mount({ plugin: 'simple-memory', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await after.find({ key: 'read:people/jane' })).toBeDefined()
+    expect(await after.find({ key: 'read:archive/postgres' })).toBeUndefined()
+    await after.unmount()
   })
 })

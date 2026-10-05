@@ -149,3 +149,13 @@ export const snippet = (body: string, match: (line: string) => boolean, width = 
   const line = lines.find(match) ?? lines.find(one => !one.startsWith('#')) ?? ''
   return line.length > width ? line.slice(0, width - 1) + '…' : line
 }
+
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+/** Matches `[[id]]`, `[[id|label]]` and `[[id#heading]]`, case-insensitive. */
+const linkPattern = (id: string) => new RegExp(`\\[\\[${escape(id)}(?=[\\]|#])`, 'gi')
+
+export const linksTo = (text: string, id: string) => linkPattern(id).test(text)
+
+/** Points every link to `from` at `to`. */
+export const relink = (text: string, from: string, to: string) => text.replace(linkPattern(from), `[[${to}`)

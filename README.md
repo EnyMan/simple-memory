@@ -10,12 +10,13 @@ database and no embeddings.
 | Piece | Behaviour |
 | --- | --- |
 | **Keyword hints** | On every prompt, the prompt is reduced to keywords (common words like *is*, *a*, *and*, *the* and filler like *please*/*help* are removed, and words are lightly stemmed). The keywords are scored against each note's title, tags, folder path and body, weighted by how rare each word is. Up to 5 matching notes are attached to the prompt as a hidden `<simple-memory-hint>`. A note is suggested at most once per conversation, and notes already read are never suggested. |
-| **Tools** | `mcp__simple-memory__search_notes`, `read_note`, `write_note`, `edit_note` (append / prepend / find_replace / replace_section / replace_body, plus title and tags) and `init_memory`. |
+| **Tools** | `mcp__simple-memory__search_notes`, `read_note`, `write_note`, `edit_note` (append / prepend / find_replace / replace_section / replace_body, plus title and tags), `move_note` (to a folder, or a new id; `[[links]]` in other notes are rewritten), `delete_note` (reports notes still linking to it) and `init_memory`. |
 | **Band** | A row above the prompt lists this conversation's notes: read notes first (`●`), then suggested ones not read yet (`○`). Clicking a note inserts `[[note-id]]` into the prompt. |
 | **Session start** | The conversation's opening context gets the usage rules, the structure guide (`MEMORY.md`) and the most recently updated notes. |
 | **`/memory-init`** | A guided interview: Claude asks what the knowledge base is for (a general shared team KB, a personal second brain, project docs, research…), proposes a folder tree and conventions, revises it with you, then writes `MEMORY.md` and creates the folders. Run it again later to restructure. You can pass a head start: `/memory-init shared wiki for the platform team`. |
 
-Opening a note with the built-in Read tool also marks it as read.
+Opening a note with the built-in Read tool also marks it as read. Deleting uses `rm` (or `del` on
+Windows), since the plugin API has no file delete.
 
 ## Notes on disk
 
