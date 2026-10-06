@@ -16,6 +16,12 @@ const MIN_HINT_SCORE = 1.5
 
 const suggested = atom({ plugin: 'simple-memory', key: 'suggested' } as const, [])
 const readNotes = atom({ plugin: 'simple-memory', key: 'read' } as const, [])
+const edited = atom({ plugin: 'simple-memory', key: 'edited' } as const, [])
+
+/** Built-in tools whose calls count as editing a file, and where each names it. */
+const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit)$/
+/** simple-memory tools that count as writing a note. */
+const NOTE_TOOLS = new Set(['write_note', 'edit_note', 'move_note', 'init_memory'].map(name => `mcp__simple-memory__${name}`))
 
 type Note = Indexed & {
   id: string
@@ -78,22 +84,35 @@ const line = (note: Note) =>
 export const register: Register = (on, options) => {
   const directory = String(options.directory ?? '').trim() || '~/simple-memory'
   const maxHints = Math.max(0, Math.floor(Number(options.maxHints ?? 5)))
+  const nudgeAfter = Math.max(0, Math.floor(Number(options.nudgeAfterFiles ?? 3)))
   const recentCount = Math.max(0, Math.floor(Number(options.recentNotes ?? 10)))
   const extra = parseStopwords(String(options.extraStopwords ?? ''))
 
   // Parsed notes by absolute path, re-read only when a file's mtime moves.
   const cache = new Map<string, Note>()
 
-  const rootOf = async (io: Io): Promise<string> => {
+  const rootPath = (home: string, cwd: string): string => {
     let dir = directory
-    if (dir === '~' || dir.startsWith('~/')) {
-      const home = (await io.home()) ?? ''
-      dir = home + dir.slice(1)
-    } else if (!dir.startsWith('/') && !/^[A-Za-z]:/.test(dir)) {
-      dir = `${await io.cwd()}/${dir}`
-    }
+    if (dir === '~' || dir.startsWith('~/')) dir = home + dir.slice(1)
+    else if (!dir.startsWith('/') && !/^[A-Za-z]:/.test(dir)) dir = `${cwd}/${dir}`
     return dir.replace(/[\\/]+$/, '')
   }
+
+  const needsHome = directory === '~' || directory.startsWith('~/')
+  const needsCwd = !needsHome && !directory.startsWith('/') && !/^[A-Za-z]:/.test(directory)
+
+  const rootOf = async (io: Io): Promise<string> =>
+    rootPath(needsHome ? ((await io.home()) ?? '') : '', needsCwd ? await io.cwd() : '')
+
+  const nudgeText = (files: readonly string[]) =>
+    [
+      `Memory check. Since the last note, this session edited ${files.length} files:`,
+      ...files.slice(0, 20).map(file => `- ${file}`),
+      ...(files.length > 20 ? [`- … and ${files.length - 20} more`] : []),
+      '',
+      `If this is a stable pause point with a non-obvious learning (a decision and its reason, a gotcha, how something works) or a finished chunk of work worth recording, search simple-memory and write or update a note (${TOOL('search_notes')}, then ${TOOL('write_note')} or ${TOOL('edit_note')}), following the structure in MEMORY.md. Keep it short and specific.`,
+      'Otherwise reply "No note needed." and nothing else.',
+    ].join('\n')
 
   const nowIso = async (io: Io) => new Date(await io.now()).toISOString().replace(/\.\d+Z$/, 'Z')
 
@@ -602,6 +621,7 @@ export const register: Register = (on, options) => {
     if (e.reason === 'clear') {
       await update($, suggested, () => [])
       await update($, readNotes, () => [])
+      await update($, edited, () => [])
     }
     return next(e)
   })
@@ -635,7 +655,9 @@ export const register: Register = (on, options) => {
       },
     }
     try {
-      return await handler(io, e as unknown as Args)
+      const done = await handler(io, e as unknown as Args)
+      if (!done.isError && NOTE_TOOLS.has(e.tool)) await update($, edited, () => [])
+      return done
     } catch (error) {
       return refuse(error instanceof Error ? error.message : String(error))
     }
@@ -796,6 +818,34 @@ export const register: Register = (on, options) => {
       '</simple-memory-hint>',
     ].join('\n')
     return next({ ...e, context: [...(e.context ?? []), hint] })
+  })
+
+  // --- The nudge: after enough code edits, ask whether a note is due. ---
+
+  on('tool.call', { tool: EDIT_TOOLS }, async ($, e, next) => {
+    const ran = await next(e)
+    if (nudgeAfter === 0 || ran.deny !== undefined || ran.isError) return ran
+    const input = e as unknown as Args
+    const path = str(input.file_path) || str(input.notebook_path)
+    if (path === '') return ran
+    const home = needsHome ? ((await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '') : ''
+    const root = rootPath(home, needsCwd ? await $.session.cwd() : '')
+    // A note file written by hand is a note, not work waiting for one.
+    if (path.startsWith(`${root}/`) && /\.md$/i.test(path)) await update($, edited, () => [])
+    else await update($, edited, list => (list.includes(path) ? list : [...list, path]))
+    return ran
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    const ended = await next(e)
+    if (nudgeAfter === 0 || e.agentId !== undefined || e.reason !== 'answer' || e.isAborted) return ended
+    const files = await read($, edited)
+    if (files.length < nudgeAfter) return ended
+    // Headless runs (-p, SDK) draw nowhere: never buy them an extra turn.
+    if ((await $.session.surfaces()).length === 0) return ended
+    await update($, edited, () => [])
+    void $.prompt.submit({ text: nudgeText(files) }).catch(() => undefined)
+    return ended
   })
 
   // --- The band: read notes first, then suggestions not read yet. ---

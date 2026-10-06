@@ -263,4 +263,55 @@ describe('plugin', () => {
     expect(await after.find({ key: 'read:archive/postgres' })).toBeUndefined()
     await after.unmount()
   })
+
+  test('nudges after enough edited files, only in drawn main-session answers', OPTIONS, async ($, on) => {
+    memoryFs(on, NOTES)
+    mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+    let surfaces: string[] = []
+    on('session.surfaces', () => ({ value: surfaces as never }))
+    on('tool.call', ($, e) => ({ result: `ran ${e.tool}` }))
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    const prompts: string[] = []
+    on('prompt.submit', ($, e) => {
+      prompts.push(e.text)
+      return { text: e.text }
+    })
+    const turn = { answer: 'done', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as const
+    const edit = (file_path: string) =>
+      $.tool.call({ tool: 'Edit', file_path, old_string: 'a', new_string: 'b', replace_all: false })
+
+    await edit('/src/a.ts')
+    await edit('/src/a.ts')
+    await edit('/src/b.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toEqual([])
+
+    await edit('/src/c.ts')
+    await $.turn.complete(turn) // headless: nothing draws
+    await $.turn.complete({ ...turn, agentId: 'sub' })
+    await $.turn.complete({ ...turn, reason: 'aborted', isAborted: true })
+    expect(prompts).toEqual([])
+
+    surfaces = ['terminal']
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('edited 3 files')
+    expect(prompts[0]).toContain('- /src/c.ts')
+    expect(prompts[0]).toContain('No note needed.')
+
+    // The count starts over; writing a note clears it too.
+    await edit('/src/d.ts')
+    await edit('/src/e.ts')
+    await $.tool.call({ tool: 'mcp__simple-memory__write_note', title: 'Gotcha', folder: 'how-to', content: 'x' })
+    await edit('/src/f.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(1)
+
+    // Editing a note file by hand counts as writing a note.
+    await edit('/src/g.ts')
+    await edit(`${ROOT}/how-to/gotcha.md`)
+    await edit('/src/h.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(1)
+  })
 })

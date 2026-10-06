@@ -8,6 +8,8 @@ declare module 'claude-code' {
       suggested: NoteRef[]
       /** Notes read this conversation, oldest first. */
       read: NoteRef[]
+      /** Files edited (Edit, Write, ...) since the last note was written. */
+      edited: string[]
     }
   }
 }

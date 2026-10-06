@@ -13,6 +13,7 @@ database and no embeddings.
 | **Tools** | `mcp__simple-memory__search_notes`, `read_note`, `write_note`, `edit_note` (append / prepend / find_replace / replace_section / replace_body, plus title and tags), `move_note` (to a folder, or a new id; `[[links]]` in other notes are rewritten), `delete_note` (reports notes still linking to it) and `init_memory`. |
 | **Band** | A row above the prompt lists this conversation's notes: read notes first (`●`), then suggested ones not read yet (`○`). Clicking a note inserts `[[note-id]]` into the prompt. |
 | **Session start** | The conversation's opening context gets the usage rules, the structure guide (`MEMORY.md`) and the most recently updated notes. |
+| **Memory nudge** | Edits made with Edit, Write, MultiEdit and NotebookEdit are tracked as a set of distinct files. When a main-session turn ends with a normal answer and 3+ files have been edited since the last note, the plugin starts one follow-up turn asking Claude whether there is a non-obvious learning or a finished chunk worth recording, and to reply "No note needed." otherwise. Never in headless (`-p`/SDK) runs, after subagent turns, or after interrupted or failed turns. Writing, editing or moving a note (or editing a note file directly) resets the count. The count survives plugin reloads and resets on `/clear`. Bash, research and reading don't count. |
 | **`/memory-init`** | A guided interview: Claude asks what the knowledge base is for (a general shared team KB, a personal second brain, project docs, research…), proposes a folder tree and conventions, revises it with you, then writes `MEMORY.md` and creates the folders. Run it again later to restructure. You can pass a head start: `/memory-init shared wiki for the platform team`. |
 
 Opening a note with the built-in Read tool also marks it as read. Deleting uses `rm` (or `del` on
@@ -52,6 +53,7 @@ Set these in `/config` or under `pluginConfigs["simple-memory"].options` in sett
 | --- | --- | --- |
 | `directory` | `~/simple-memory` | Where the notes live. Absolute, `~/…`, or relative to the project (e.g. `docs/memory` for a per-repo KB). |
 | `maxHints` | `5` | The most notes hinted for one prompt (`0` turns hints off). |
+| `nudgeAfterFiles` | `3` | Distinct edited files before the memory nudge (`0` turns it off). |
 | `recentNotes` | `10` | Recently updated notes listed at session start. |
 | `extraStopwords` | `""` | More words to ignore, comma- or space-separated (handy for prompts in another language). |
 
