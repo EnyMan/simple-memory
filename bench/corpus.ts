@@ -1,4 +1,5 @@
-// A synthetic knowledge base: deterministic notes with frontmatter, nested
+// A synthetic knowledge base: deterministic notes with frontmatter (title,
+// summary, keywords, tags), nested
 // folders, Zipf-distributed vocabulary and bodies of 1 to 20 KB. Pure (no
 // file system), so the disk benchmark and the engine benchmark share it.
 
@@ -94,7 +95,9 @@ export const corpus = (count: number, options: CorpusOptions = {}): CorpusNote[]
       lines.push(random() < 0.2 ? `- ${sentence}` : sentence)
       size += sentence.length + 1
     }
-    const text = `---\ntitle: ${title}\ntags: [${tags.join(', ')}]\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n\n${lines.join('\n')}\n`
+    const keywords = [...new Set([...titleWords, ...Array.from({ length: 2 + Math.floor(random() * 7) }, word)])].slice(0, 12)
+    const summary = Array.from({ length: 8 + Math.floor(random() * 8) }, word).join(' ')
+    const text = `---\ntitle: ${title}\nsummary: ${summary}\nkeywords: [${keywords.join(', ')}]\ntags: [${tags.join(', ')}]\ncreated: 2026-01-01T00:00:00Z\nupdated: 2026-01-01T00:00:00Z\n---\n\n${lines.join('\n')}\n`
     notes.push({ rel, text })
   }
   return notes

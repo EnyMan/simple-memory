@@ -65,12 +65,15 @@ const memoryFs = (on: On, files: Record<string, string> = {}) => {
   return store
 }
 
+/** The fields write_note requires beside title, folder and content. */
+const SCHEMA = { summary: 'What to check before a release.', keywords: ['release', 'checklist', 'ship'] }
+
 const NOTES = {
   [`${ROOT}/MEMORY.md`]: '# Memory structure\n\nTeam knowledge.\n\n## Folders\n\n- `decisions/` — why we chose things\n',
   [`${ROOT}/decisions/use-postgres.md`]:
     '---\ntitle: Use Postgres for storage\ntags: [database, backend]\n---\n\nWe chose Postgres over MySQL for JSONB support.\n',
   [`${ROOT}/how-to/deploy-backend.md`]:
-    '---\ntitle: Deploy the backend\ntags: [ops]\n---\n\nRun the deploy pipeline from main.\n',
+    '---\ntitle: Deploy the backend\nsummary: Run the deploy pipeline from main; roll back with the previous tag.\nkeywords: [deploy, release, rollback, pipeline]\ntags: [ops]\n---\n\nRun the deploy pipeline from main. The cluster is kubernetes.\n',
   [`${ROOT}/people/jane.md`]:
     '---\ntitle: Jane Doe\n---\n\nOwns the billing service. Agreed on [[decisions/use-postgres|Postgres]].\n',
 }
@@ -88,8 +91,13 @@ describe('keywords', () => {
 
 describe('notes', () => {
   test('frontmatter round trip', () => {
-    const parsed = parse('---\ntitle: "A: b"\ntags:\n  - x\n  - y\nowner: me\n---\n\nBody\n', 'f')
+    const parsed = parse(
+      '---\ntitle: "A: b"\nsummary: "One line: here"\nkeywords:\n  - alpha\n  - beta gamma\ntags:\n  - x\n  - y\nowner: me\n---\n\nBody\n',
+      'f',
+    )
     expect(parsed.meta.title).toBe('A: b')
+    expect(parsed.meta.summary).toBe('One line: here')
+    expect(parsed.meta.keywords).toEqual(['alpha', 'beta gamma'])
     expect(parsed.meta.tags).toEqual(['x', 'y'])
     const again = parse(serialize(parsed), 'f')
     expect(again.meta).toEqual(parsed.meta)
@@ -145,14 +153,17 @@ describe('plugin', () => {
       folder: 'how-to',
       content: '# Release checklist\n\n## Steps\n\n- tag\n',
       tags: ['Ops'],
+      ...SCHEMA,
     })
     expect(String(wrote.result)).toContain('Created how-to/release-checklist')
-    expect(files.get(`${ROOT}/how-to/release-checklist.md`)).toContain('tags: [ops]\ncreated: 2026-10-05T00:00:00Z')
+    expect(files.get(`${ROOT}/how-to/release-checklist.md`)).toContain(
+      'summary: What to check before a release.\nkeywords: [release, checklist, ship]\ntags: [ops]\ncreated: 2026-10-05T00:00:00Z',
+    )
 
     const found = await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: 'release steps' })
     expect(String(found.result)).toContain('how-to/release-checklist')
 
-    await $.tool.call({
+    const edited = await $.tool.call({
       tool: 'mcp__simple-memory__edit_note',
       note: 'Release checklist',
       operation: 'replace_section',
@@ -160,6 +171,7 @@ describe('plugin', () => {
       content: '- tag\n- announce',
     })
     expect(files.get(`${ROOT}/how-to/release-checklist.md`)).toContain('- announce')
+    expect(String(edited.result)).toContain('Check that the summary and keywords still fit')
 
     const read = await $.tool.call({ tool: 'mcp__simple-memory__read_note', notes: ['[[how-to/release-checklist]]'] })
     expect(String(read.result)).toContain('- announce')
@@ -169,6 +181,7 @@ describe('plugin', () => {
       title: 'Release checklist',
       folder: 'how-to',
       content: 'x',
+      ...SCHEMA,
     })
     expect(String(twice.result)).toContain('already exists')
 
@@ -177,6 +190,7 @@ describe('plugin', () => {
       title: 'x',
       folder: '../etc',
       content: 'x',
+      ...SCHEMA,
     })
     expect(String(escape.result)).toContain('inside the memory root')
 
@@ -303,7 +317,7 @@ describe('plugin', () => {
     // The count starts over; writing a note clears it too.
     await edit('/src/d.ts')
     await edit('/src/e.ts')
-    await $.tool.call({ tool: 'mcp__simple-memory__write_note', title: 'Gotcha', folder: 'how-to', content: 'x' })
+    await $.tool.call({ tool: 'mcp__simple-memory__write_note', title: 'Gotcha', folder: 'how-to', content: 'x', ...SCHEMA })
     await edit('/src/f.ts')
     await $.turn.complete(turn)
     expect(prompts).toHaveLength(1)
@@ -314,5 +328,68 @@ describe('plugin', () => {
     await edit('/src/h.ts')
     await $.turn.complete(turn)
     expect(prompts).toHaveLength(1)
+  })
+
+  test('write_note enforces the schema; edit_note can fix a legacy note', OPTIONS, async ($, on) => {
+    const files = memoryFs(on, NOTES)
+    mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+    const write = (extra: Record<string, unknown>) =>
+      $.tool.call({ tool: 'mcp__simple-memory__write_note', title: 'Gotcha', folder: 'how-to', content: 'x', ...extra })
+
+    expect(String((await write({ keywords: SCHEMA.keywords })).result)).toContain('summary is required')
+    expect(String((await write({ summary: 'x', keywords: ['one', 'two'] })).result)).toContain('keywords needs 3-12')
+    expect(String((await write({ summary: 'a\nb'.repeat(150), keywords: SCHEMA.keywords })).result)).toContain(
+      'at most 200',
+    )
+    expect(files.has(`${ROOT}/how-to/gotcha.md`)).toBe(false)
+
+    // A legacy note: flagged in search, fixed with a frontmatter-only edit.
+    const found = await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: 'postgres' })
+    expect(String(found.result)).toContain('decisions/use-postgres')
+    expect(String(found.result)).toContain('(no summary and keywords)')
+
+    const fixed = await $.tool.call({
+      tool: 'mcp__simple-memory__edit_note',
+      note: 'decisions/use-postgres',
+      summary: 'Why we chose Postgres over MySQL.',
+      keywords: ['Postgres', 'database', 'mysql', 'jsonb'],
+    })
+    expect(String(fixed.result)).toBe('Updated decisions/use-postgres.')
+    expect(files.get(`${ROOT}/decisions/use-postgres.md`)).toContain('keywords: [postgres, database, mysql, jsonb]')
+    expect(files.get(`${ROOT}/decisions/use-postgres.md`)).toContain('We chose Postgres over MySQL')
+
+    const appended = await $.tool.call({
+      tool: 'mcp__simple-memory__edit_note',
+      note: 'people/jane',
+      operation: 'append',
+      content: 'Also on call.',
+    })
+    expect(String(appended.result)).toContain('no summary and keywords')
+  })
+
+  test('hints match frontmatter only; search also reads bodies', OPTIONS, async ($, on) => {
+    memoryFs(on, NOTES)
+    const contexts: (readonly string[] | undefined)[] = []
+    on('prompt.submit', ($, e) => {
+      contexts.push(e.context)
+      return { text: e.text, context: e.context }
+    })
+
+    // "kubernetes" is only in a body: no hint.
+    await $.prompt.submit({ text: 'Is our kubernetes cluster healthy?', ...TYPED })
+    expect(contexts[0]).toBeUndefined()
+
+    // A keyword hit hints, with the note's summary.
+    await $.prompt.submit({ text: 'How do I roll out a release?', ...TYPED })
+    const hint = contexts[1]?.join('\n') ?? ''
+    expect(hint).toContain('how-to/deploy-backend — "Deploy the backend" [ops]: Run the deploy pipeline from main')
+
+    const body = await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: 'kubernetes' })
+    expect(String(body.result)).toContain('how-to/deploy-backend')
+    expect(String(body.result)).toContain('The cluster is kubernetes.')
+
+    // Frontmatter matches rank above body-only ones.
+    const ranked = String((await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: 'postgres' })).result)
+    expect(ranked.indexOf('decisions/use-postgres')).toBeLessThan(ranked.indexOf('people/jane'))
   })
 })

@@ -59,13 +59,13 @@ export const parseStopwords = (list: string): ReadonlySet<string> =>
       .filter(Boolean),
   )
 
-/** What the scorer needs from a note. */
+/** What the scorer needs from a note: its frontmatter, reduced to terms. */
 export type Indexed = {
+  keywordTerms: ReadonlySet<string>
   titleTerms: ReadonlySet<string>
   tagTerms: ReadonlySet<string>
+  summaryTerms: ReadonlySet<string>
   pathTerms: ReadonlySet<string>
-  /** Each body term with how often it occurs. */
-  bodyTerms: ReadonlyMap<string, number>
 }
 
 export type Scored<T> = {
@@ -73,27 +73,39 @@ export type Scored<T> = {
   score: number
   /** Distinct query terms the note matched. */
   matched: number
-  /** Whether a term hit the title, tags or path, not only the body. */
+  /** Whether a term hit the keywords, title or tags, not only the summary or path. */
   isStrong: boolean
 }
 
+/** Field weights: keywords and title count most, the folder path least. */
+const WEIGHTS = { keyword: 3, title: 3, tag: 2, summary: 1.5, path: 1 } as const
+
 export const has = (note: Indexed, term: string) =>
-  note.titleTerms.has(term) || note.tagTerms.has(term) || note.pathTerms.has(term) || note.bodyTerms.has(term)
+  note.keywordTerms.has(term) ||
+  note.titleTerms.has(term) ||
+  note.tagTerms.has(term) ||
+  note.summaryTerms.has(term) ||
+  note.pathTerms.has(term)
 
-/**
- * Scores every note against `query` (already reduced to keywords) with
- * field weights times inverse document frequency; unmatched notes are left out.
- */
-export const score = <T extends Indexed>(notes: readonly T[], query: readonly string[]): Scored<T>[] => {
-  const total = notes.length
-  if (total === 0 || query.length === 0) return []
-
+/** Inverse document frequency of each query term that some note has. */
+const idfOf = (notes: readonly Indexed[], query: readonly string[]) => {
   const idf = new Map<string, number>()
   for (const term of query) {
     let df = 0
     for (const note of notes) if (has(note, term)) df += 1
-    if (df > 0) idf.set(term, Math.log(1 + total / df))
+    if (df > 0) idf.set(term, Math.log(1 + notes.length / df))
   }
+  return idf
+}
+
+/**
+ * Scores every note's frontmatter against `query` (already reduced to
+ * keywords) with field weights times inverse document frequency; unmatched
+ * notes are left out.
+ */
+export const score = <T extends Indexed>(notes: readonly T[], query: readonly string[]): Scored<T>[] => {
+  if (notes.length === 0 || query.length === 0) return []
+  const idf = idfOf(notes, query)
 
   const out: Scored<T>[] = []
   for (const note of notes) {
@@ -102,12 +114,12 @@ export const score = <T extends Indexed>(notes: readonly T[], query: readonly st
     let isStrong = false
     for (const [term, weight] of idf) {
       let s = 0
-      if (note.titleTerms.has(term)) s += 3
-      if (note.tagTerms.has(term)) s += 2.5
-      if (note.pathTerms.has(term)) s += 1.5
+      if (note.keywordTerms.has(term)) s += WEIGHTS.keyword
+      if (note.titleTerms.has(term)) s += WEIGHTS.title
+      if (note.tagTerms.has(term)) s += WEIGHTS.tag
       if (s > 0) isStrong = true
-      const count = note.bodyTerms.get(term) ?? 0
-      if (count > 0) s += Math.min(1 + Math.log(count), 3)
+      if (note.summaryTerms.has(term)) s += WEIGHTS.summary
+      if (note.pathTerms.has(term)) s += WEIGHTS.path
       if (s > 0) {
         matched += 1
         sum += s * weight
@@ -120,8 +132,8 @@ export const score = <T extends Indexed>(notes: readonly T[], query: readonly st
 }
 
 /**
- * The notes worth hinting for a prompt: a title, tag or path hit, or at
- * least two distinct terms in the body, and a score above the floor.
+ * The notes worth hinting for a prompt: a keyword, title or tag hit, or at
+ * least two distinct terms in the summary or path, and a score above the floor.
  */
 export const relevant = <T extends Indexed>(
   notes: readonly T[],
@@ -131,3 +143,71 @@ export const relevant = <T extends Indexed>(
   score(notes, query).filter(
     one => one.score >= minScore && (one.isStrong || one.matched >= Math.min(2, query.length)),
   )
+
+const WORD_CHAR = /[\p{L}\p{N}]/u
+
+/**
+ * Finds words that start with a stemmed term, so `deploy` matches deploys,
+ * deployed and deployment but not redeploy; `policy` (stemmed from policies)
+ * matches from `polic`. A plain case-insensitive pattern plus a check of the
+ * character before each match: lookbehind is many times slower on some engines.
+ */
+export const bodyMatcher = (term: string) => {
+  const prefix = term.length > 3 && term.endsWith('y') ? term.slice(0, -1) : term
+  const pattern = new RegExp(prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+  const count = (text: string, cap = Infinity) => {
+    pattern.lastIndex = 0
+    let found = 0
+    for (let match = pattern.exec(text); match !== null && found < cap; match = pattern.exec(text)) {
+      if (match.index === 0 || !WORD_CHAR.test(text[match.index - 1] ?? '')) found += 1
+    }
+    return found
+  }
+  return { count, test: (text: string) => count(text, 1) > 0 }
+}
+
+export type Searched<T> = Scored<T> & {
+  /** The frontmatter's share of the score; 0 for a body-only match. */
+  front: number
+  /** Distinct query terms found in the body. */
+  inBody: number
+}
+
+/**
+ * Full-text search: frontmatter scores as for hints, plus matches of each
+ * term in the body, counted at query time (no body index is kept). Notes with
+ * a frontmatter match rank above body-only ones.
+ */
+export const search = <T extends Indexed & { body: string }>(
+  notes: readonly T[],
+  query: readonly string[],
+): Searched<T>[] => {
+  if (notes.length === 0 || query.length === 0) return []
+  const front = new Map(score(notes, query).map(hit => [hit.item, hit]))
+  const matchers = query.map(bodyMatcher)
+
+  const out: Searched<T>[] = []
+  for (const note of notes) {
+    let body = 0
+    let inBody = 0
+    for (const matcher of matchers) {
+      const count = matcher.count(note.body, 20)
+      if (count > 0) {
+        inBody += 1
+        body += Math.min(1 + Math.log(count), 3)
+      }
+    }
+    const hit = front.get(note)
+    if (!hit && inBody === 0) continue
+    out.push({
+      item: note,
+      score: (hit?.score ?? 0) + body,
+      front: hit?.score ?? 0,
+      matched: Math.max(hit?.matched ?? 0, inBody),
+      isStrong: hit?.isStrong ?? false,
+      inBody,
+    })
+  }
+
+  return out.sort((a, b) => Number(b.front > 0) - Number(a.front > 0) || b.score - a.score)
+}

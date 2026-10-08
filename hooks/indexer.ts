@@ -1,9 +1,10 @@
-// The note index: every markdown file under the memory root, parsed and
-// reduced to terms, re-read only when a file's mtime moves.
+// The note index: every markdown file under the memory root, its
+// frontmatter reduced to terms, re-read only when a file's mtime moves.
+// Bodies are kept as text for search and links, never tokenized here.
 
 import { terms } from './keywords'
 import type { Indexed } from './keywords'
-import { idOf, parse } from './notes'
+import { firstParagraph, headings, idOf, parse } from './notes'
 
 /** The structure guide at the root; never indexed as a note. */
 export const GUIDE = 'MEMORY.md'
@@ -15,10 +16,16 @@ export type Note = Indexed & {
   rel: string
   abs: string
   title: string
+  /** The frontmatter's summary, or the first paragraph when it has none. */
+  summary: string
+  keywords: string[]
   tags: string[]
   updated: string
   mtimeMs: number
   body: string
+  /** Whether the frontmatter has its own keywords and summary (not derived). */
+  hasKeywords: boolean
+  hasSummary: boolean
 }
 
 /** One directory entry, as `$.fs.list` answers it. */
@@ -40,21 +47,30 @@ export const buildNote = (
 ): Note => {
   const id = idOf(rel)
   const { meta, body } = parse(text, id.split('/').pop() ?? id)
-  const bodyTerms = new Map<string, number>()
-  for (const term of terms(body.slice(0, 50_000), extra)) bodyTerms.set(term, (bodyTerms.get(term) ?? 0) + 1)
+  const hasKeywords = meta.keywords.length > 0
+  const hasSummary = (meta.summary ?? '').trim() !== ''
+  const summary = hasSummary ? meta.summary!.trim() : firstParagraph(body)
+  // A note from before the schema: its headings stand in for keywords.
+  const keywordText = hasKeywords ? meta.keywords.join(' ') : headings(body).join(' ')
+  const words = (text: string) => new Set(terms(text.replace(/[-_/]/g, ' '), extra))
   return {
     id,
     rel,
     abs,
     title: meta.title,
+    summary,
+    keywords: meta.keywords,
     tags: meta.tags,
     updated: meta.updated ?? meta.created ?? '',
     mtimeMs,
     body,
-    titleTerms: new Set(terms(meta.title, extra)),
-    tagTerms: new Set(meta.tags.flatMap(tag => terms(tag.replace(/[-_/]/g, ' '), extra))),
-    pathTerms: new Set(terms(id.replace(/[-_/]/g, ' '), extra)),
-    bodyTerms,
+    hasKeywords,
+    hasSummary,
+    keywordTerms: words(keywordText),
+    titleTerms: words(meta.title),
+    tagTerms: words(meta.tags.join(' ')),
+    summaryTerms: words(summary),
+    pathTerms: words(id),
   }
 }
 

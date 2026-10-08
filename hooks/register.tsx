@@ -2,10 +2,26 @@ import { atom, read, update } from 'claude-code'
 import type { FsEntry, Register } from 'claude-code'
 
 import type { NoteRef } from '../types'
-import { keywords, parseStopwords, relevant, score, terms } from './keywords'
+import { bodyMatcher, keywords, parseStopwords, relevant, score, search } from './keywords'
 import { createIndexer, GUIDE } from './indexer'
 import type { Note } from './indexer'
-import { findReplace, idOf, linksTo, parse, relink, replaceSection, safeRelative, serialize, slugify, snippet, tidyTags } from './notes'
+import {
+  checkKeywords,
+  checkSummary,
+  findReplace,
+  idOf,
+  KEYWORDS_MAX,
+  KEYWORDS_MIN,
+  linksTo,
+  parse,
+  relink,
+  replaceSection,
+  safeRelative,
+  serialize,
+  slugify,
+  snippet,
+  tidyTags,
+} from './notes'
 import type { Parsed } from './notes'
 
 const PLUGIN = 'simple-memory'
@@ -66,8 +82,17 @@ const answer = (text: string) => ({ result: text })
 const refuse = (text: string) => ({ result: `Error: ${text}`, isError: true as const })
 
 const refOf = (note: Note): NoteRef => ({ id: note.id, title: note.title })
+const clip = (text: string, width: number) => (text.length > width ? `${text.slice(0, width - 1)}…` : text)
 const line = (note: Note) =>
-  `- ${note.id} — "${note.title}"${note.tags.length > 0 ? ` [${note.tags.join(', ')}]` : ''}`
+  `- ${note.id} — "${note.title}"${note.tags.length > 0 ? ` [${note.tags.join(', ')}]` : ''}${
+    note.summary ? `: ${clip(note.summary, 140)}` : ''
+  }`
+/** Says what a note from before the schema is missing. */
+const missing = (note: Note) =>
+  [!note.hasSummary && 'summary', !note.hasKeywords && 'keywords'].filter(Boolean).join(' and ')
+
+/** The note format, as the rules and MEMORY.md state it. */
+const SCHEMA = `Every note has frontmatter with a title, a one-line summary and ${KEYWORDS_MIN}-${KEYWORDS_MAX} keywords (the words someone would use when the note is relevant, synonyms included); tags are optional. The per-prompt hints match only on these fields, so choose them with care; search_notes also reads note bodies.`
 
 export const register: Register = (on, options) => {
   const directory = String(options.directory ?? '').trim() || '~/simple-memory'
@@ -139,10 +164,10 @@ export const register: Register = (on, options) => {
       `You have a persistent knowledge base ("simple-memory") of markdown notes in ${root}.`,
       '',
       'Tools:',
-      `- ${TOOL('search_notes')}: keyword search over titles, tags, paths and text.`,
+      `- ${TOOL('search_notes')}: keyword search over every note's frontmatter and full text.`,
       `- ${TOOL('read_note')}: read one or more notes by id, path or title.`,
-      `- ${TOOL('write_note')}: create a note (title, folder, content, tags).`,
-      `- ${TOOL('edit_note')}: append, prepend, find/replace, or replace a section of a note.`,
+      `- ${TOOL('write_note')}: create a note (title, summary, keywords, folder, content, tags).`,
+      `- ${TOOL('edit_note')}: append, prepend, find/replace, or replace a section of a note; update its summary and keywords.`,
       `- ${TOOL('move_note')}: move or rename a note; links to it are updated.`,
       `- ${TOOL('delete_note')}: delete a note (only when the user asks or agrees).`,
       '',
@@ -151,6 +176,7 @@ export const register: Register = (on, options) => {
       '- Search before writing: extend or correct an existing note rather than creating a near-duplicate.',
       '- Save durable knowledge: decisions and their reasons, facts, how-tos, people and project context, preferences the user states. Not transient chatter. When unsure whether something belongs in memory, ask.',
       '- Keep one topic per note with a specific title; link related notes as [[note-id]].',
+      `- ${SCHEMA} When you edit a note so that its summary or keywords no longer fit, update them in the same edit_note call. When a tool result says a note is missing them, add them.`,
       '- Change notes only through these tools (not Write/Edit/Bash), so metadata stays consistent.',
       '- Follow the structure and conventions below. If a note fits no folder, ask before inventing a new top-level folder.',
     ]
@@ -189,7 +215,7 @@ export const register: Register = (on, options) => {
       'Guide me to the best structure, as a short interview:',
       '1. Ask what the knowledge base is for (use AskUserQuestion with concrete options, e.g. a general shared team knowledge base, a personal second brain, one project\'s documentation and decisions, research notes, customer/support knowledge, or something else). One or two questions at a time.',
       '2. Then ask what matters for that use case: who reads and writes it (just me, a team via git), the main kinds of knowledge (decisions, how-tos, people, projects, glossary, meetings, references...), and how granular notes should be.',
-      '3. Propose a folder tree, at most two levels deep and about 4-10 top-level folders, each with a one-line purpose; plus conventions: note title style, when to create vs. edit a note, tag vocabulary, linking with [[note-id]], and what not to store (secrets, transient chatter). For a general shared knowledge base, a good starting point is something like: decisions/, how-to/, concepts/, projects/, people/, references/, and inbox/ for unsorted notes.',
+      '3. Propose a folder tree, at most two levels deep and about 4-10 top-level folders, each with a one-line purpose; plus conventions: note title style, when to create vs. edit a note, tag vocabulary, keyword habits (every note has a one-line summary and ${KEYWORDS_MIN}-${KEYWORDS_MAX} keywords; the plugin enforces this), linking with [[note-id]], and what not to store (secrets, transient chatter). For a general shared knowledge base, a good starting point is something like: decisions/, how-to/, concepts/, projects/, people/, references/, and inbox/ for unsorted notes.',
       '4. Revise until I approve, then call mcp__simple-memory__init_memory with the result. Offer to write one or two seed notes after that.',
       'Keep each message short.',
     ]
@@ -202,7 +228,7 @@ export const register: Register = (on, options) => {
     {
       name: 'search_notes',
       description:
-        'Keyword search over the simple-memory knowledge base (titles, tags, folder paths and text; no semantic search, so try synonyms if nothing matches). An empty query lists the most recently updated notes. Returns note ids with a snippet; read them with read_note.',
+        'Keyword search over every note of the simple-memory knowledge base: frontmatter (keywords, title, tags, summary, folder path) and full text. No semantic search, so try synonyms if nothing matches. Frontmatter matches rank first. An empty query lists the most recently updated notes. Returns note ids with their summary and a matching line; read them with read_note.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -228,36 +254,48 @@ export const register: Register = (on, options) => {
     {
       name: 'write_note',
       description:
-        'Create a note in the simple-memory knowledge base. The file is <folder>/<slug of title>.md with title, tags and timestamps in its frontmatter. Search first; to change an existing note use edit_note (or overwrite: true to replace it whole).',
+        `Create a note in the simple-memory knowledge base. The file is <folder>/<slug of title>.md with title, summary, keywords, tags and timestamps in its frontmatter. summary and keywords are required: the per-prompt hints match only on the frontmatter. Search first; to change an existing note use edit_note (or overwrite: true to replace it whole).`,
       inputSchema: {
         type: 'object',
         properties: {
           title: { type: 'string', description: 'A specific, descriptive title.' },
+          summary: { type: 'string', description: 'One line (at most 200 characters) saying what the note holds.' },
+          keywords: {
+            type: 'array',
+            items: { type: 'string' },
+            description: `${KEYWORDS_MIN}-${KEYWORDS_MAX} terms someone would use when this note is relevant, including synonyms and names not in the title.`,
+          },
           folder: { type: 'string', description: 'Folder under the memory root, following its structure ("" for the root).' },
           content: { type: 'string', description: 'The markdown body (no frontmatter).' },
           tags: { type: 'array', items: { type: 'string' } },
           overwrite: { type: 'boolean', description: 'Replace the note if it exists (default false).' },
         },
-        required: ['title', 'folder', 'content'],
+        required: ['title', 'summary', 'keywords', 'folder', 'content'],
       },
     },
     {
       name: 'edit_note',
       description:
-        'Edit a note of the simple-memory knowledge base. operation: "append" or "prepend" content to the body; "find_replace" replaces the exact text `find` (must be unique unless replace_all); "replace_section" replaces the body under heading `section` (added if missing); "replace_body" replaces the whole body. title and tags, when given, update the metadata (the file keeps its path).',
+        'Edit a note of the simple-memory knowledge base. operation: "append" or "prepend" content to the body; "find_replace" replaces the exact text `find` (must be unique unless replace_all); "replace_section" replaces the body under heading `section` (added if missing); "replace_body" replaces the whole body. title, summary, keywords and tags, when given, update the frontmatter (the file keeps its path); give only those to change the frontmatter alone. Keep summary and keywords true to the body.',
       inputSchema: {
         type: 'object',
         properties: {
           note: { type: 'string', description: 'The note: id, path or title.' },
-          operation: { type: 'string', enum: ['append', 'prepend', 'find_replace', 'replace_section', 'replace_body'] },
+          operation: {
+            type: 'string',
+            enum: ['append', 'prepend', 'find_replace', 'replace_section', 'replace_body'],
+            description: 'Left out to change only the frontmatter.',
+          },
           content: { type: 'string', description: 'The new text.' },
           find: { type: 'string', description: 'For find_replace: the exact text to replace.' },
           replace_all: { type: 'boolean', description: 'For find_replace: replace every occurrence.' },
           section: { type: 'string', description: 'For replace_section: the heading text.' },
           title: { type: 'string', description: 'A new title.' },
+          summary: { type: 'string', description: 'A new one-line summary.' },
+          keywords: { type: 'array', items: { type: 'string' }, description: `The new full keyword list (${KEYWORDS_MIN}-${KEYWORDS_MAX}).` },
           tags: { type: 'array', items: { type: 'string' }, description: 'The new full tag list.' },
         },
-        required: ['note', 'operation'],
+        required: ['note'],
       },
     },
     {
@@ -327,14 +365,16 @@ export const register: Register = (on, options) => {
       return answer([`${notes.length} notes; most recently updated:`, ...recent.map(line)].join('\n'))
     }
 
-    const hits = score(notes, query).slice(0, limit)
+    const hits = search(notes, query).slice(0, limit)
     if (hits.length === 0) return answer(`No notes match ${query.join(', ')}. Try other words or synonyms.`)
-    const isHit = (text: string) => terms(text, extra).some(term => query.includes(term))
+    const matchers = query.map(bodyMatcher)
+    const isHit = (text: string) => matchers.some(matcher => matcher.test(text))
     return answer(
       hits
-        .map(({ item }) => {
-          const quote = snippet(item.body, isHit)
-          return `${line(item)}${quote ? `\n    ${quote}` : ''}`
+        .map(({ item, inBody }) => {
+          const quote = inBody > 0 ? snippet(item.body, isHit) : ''
+          const gap = missing(item)
+          return `${line(item)}${gap ? ` (no ${gap})` : ''}${quote ? `\n    ${quote}` : ''}`
         })
         .join('\n'),
     )
@@ -365,6 +405,10 @@ export const register: Register = (on, options) => {
   const writeNote = async (io: Io, args: Args) => {
     const title = str(args.title).trim()
     if (title === '') return refuse('title is required.')
+    const summary = checkSummary(str(args.summary))
+    if (typeof summary !== 'string') return refuse(summary.error)
+    const keywordList = checkKeywords(strs(args.keywords))
+    if (!Array.isArray(keywordList)) return refuse(keywordList.error)
     const folder = safeRelative(str(args.folder))
     if (folder === undefined) return refuse('folder must be a relative path inside the memory root.')
     const root = await rootOf(io)
@@ -377,7 +421,15 @@ export const register: Register = (on, options) => {
     const now = await nowIso(io)
     const previous = exists ? parse(String(await io.read(abs).catch(() => '')), title).meta : undefined
     await saveNote(io, root, rel, {
-      meta: { title, tags: tidyTags(strs(args.tags)), created: previous?.created ?? now, updated: now, rest: previous?.rest ?? [] },
+      meta: {
+        title,
+        summary,
+        keywords: keywordList,
+        tags: tidyTags(strs(args.tags)),
+        created: previous?.created ?? now,
+        updated: now,
+        rest: previous?.rest ?? [],
+      },
       body: str(args.content),
     })
     await markRead(io, [{ id: idOf(rel), title }])
@@ -418,20 +470,43 @@ export const register: Register = (on, options) => {
       case 'replace_body':
         body = content
         break
-      default:
-        if (args.title === undefined && args.tags === undefined) {
-          return refuse('operation must be append, prepend, find_replace, replace_section or replace_body.')
+      case '':
+        if ([args.title, args.summary, args.keywords, args.tags].every(one => one === undefined)) {
+          return refuse('give an operation, or title, summary, keywords or tags to change the frontmatter.')
         }
+        break
+      default:
+        return refuse('operation must be append, prepend, find_replace, replace_section or replace_body.')
     }
 
+    let summary = parsed.meta.summary
+    if (args.summary !== undefined) {
+      const checked = checkSummary(str(args.summary))
+      if (typeof checked !== 'string') return refuse(checked.error)
+      summary = checked
+    }
+    let keywordList = parsed.meta.keywords
+    if (args.keywords !== undefined) {
+      const checked = checkKeywords(strs(args.keywords))
+      if (!Array.isArray(checked)) return refuse(checked.error)
+      keywordList = checked
+    }
     const title = str(args.title).trim() || parsed.meta.title
     const tags = args.tags === undefined ? parsed.meta.tags : tidyTags(strs(args.tags))
     await saveNote(io, root, note.rel, {
-      meta: { ...parsed.meta, title, tags, updated: await nowIso(io) },
+      meta: { ...parsed.meta, title, summary, keywords: keywordList, tags, updated: await nowIso(io) },
       body,
     })
     await markRead(io, [{ id: note.id, title }])
-    return answer(`Updated ${note.id}.`)
+
+    const notes: string[] = [`Updated ${note.id}.`]
+    const gap = [!summary && 'summary', keywordList.length === 0 && 'keywords'].filter(Boolean).join(' and ')
+    if (gap) {
+      notes.push(`This note has no ${gap}: add ${gap === 'summary' ? 'it' : 'them'} with edit_note, so hints can find it.`)
+    } else if (/^(replace_body|replace_section)$/.test(str(args.operation)) && args.summary === undefined && args.keywords === undefined) {
+      notes.push(`Check that the summary and keywords still fit the new text: summary "${summary}"; keywords ${keywordList.join(', ')}.`)
+    }
+    return answer(notes.join(' '))
   }
 
   const moveNote = async (io: Io, args: Args) => {
@@ -508,6 +583,10 @@ export const register: Register = (on, options) => {
       '## Folders',
       '',
       ...folders.map(one => `- \`${one.path}/\` — ${one.purpose}`),
+      '',
+      '## Note format',
+      '',
+      SCHEMA,
       '',
       '## Conventions',
       '',

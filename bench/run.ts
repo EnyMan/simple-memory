@@ -16,7 +16,7 @@ import { join } from 'node:path'
 
 import { createIndexer } from '../hooks/indexer'
 import type { IndexIo } from '../hooks/indexer'
-import { keywords, relevant } from '../hooks/keywords'
+import { keywords, relevant, search } from '../hooks/keywords'
 import { corpus, PROMPTS } from './corpus'
 
 const args = process.argv.slice(2)
@@ -100,7 +100,13 @@ const benchDisk = async (n: number, base: string) => {
   for (let i = 0; i < 50; i++) {
     for (const prompt of PROMPTS) scoring.push(await time(() => relevant(indexed, keywords(prompt), MIN_HINT_SCORE)))
   }
-  record(n, 'scoring: keywords + relevant() over all notes', scoring)
+  record(n, 'scoring: keywords + relevant() (frontmatter)', scoring)
+
+  const searching: number[] = []
+  for (let i = 0; i < 10; i++) {
+    for (const prompt of PROMPTS.slice(0, 4)) searching.push(await time(() => search(indexed, keywords(prompt))))
+  }
+  record(n, 'search: frontmatter + full text over all notes', searching)
 
   const hint: number[] = []
   for (let i = 0; i < 20; i++) {
