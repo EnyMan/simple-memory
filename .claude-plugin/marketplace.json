@@ -1,0 +1,14 @@
+{
+  "name": "simple-memory",
+  "owner": { "name": "EnyMan" },
+  "metadata": {
+    "description": "simple-memory: a local markdown knowledge base for Claude Code."
+  },
+  "plugins": [
+    {
+      "name": "simple-memory",
+      "source": "./",
+      "description": "A local markdown knowledge base with keyword hints on every prompt, note tools, a band of suggested and read notes, and a memory nudge."
+    }
+  ]
+}
