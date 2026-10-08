@@ -84,8 +84,10 @@ claude plugin marketplace add /path/to/simple-memory   # a folder marketplace: e
 claude --plugin-dir /path/to/simple-memory             # or load it for one session, hot-reloading on save
 claude plugin validate /path/to/simple-memory          # check manifest and hooks
 claude plugin test /path/to/simple-memory              # run tests/*.test.ts
+bun bench/run.ts                                       # benchmark: see bench/README.md
 ```
 
 Layout: `hooks/register.tsx` (hooks, tools, band, command, nudge), `hooks/keywords.ts` (stopwords,
-stemming, scoring), `hooks/notes.ts` (frontmatter and note edits), `types/index.d.ts` (session state
+stemming, scoring), `hooks/notes.ts` (frontmatter and note edits), `hooks/indexer.ts` (the
+cached note index), `bench/` (benchmark), `types/index.d.ts` (session state
 contract), `.claude-plugin/marketplace.json` (the marketplace listing this repo as one plugin).
