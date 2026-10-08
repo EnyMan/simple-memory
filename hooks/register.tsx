@@ -4,6 +4,7 @@ import type { FsEntry, Register } from 'claude-code'
 import type { NoteRef } from '../types'
 import { bodyMatcher, keywords, parseStopwords, relevant, score, search } from './keywords'
 import { createIndexer, GUIDE, listNotes } from './indexer'
+import { isAbsolute, normalize, pathKey, relativeTo, removeFile } from './paths'
 import type { Note } from './indexer'
 import {
   checkKeywords,
@@ -95,7 +96,7 @@ const missing = (note: Note) =>
 const SCHEMA = `Every note has frontmatter with a title, a one-line summary and ${KEYWORDS_MIN}-${KEYWORDS_MAX} keywords (the words someone would use when the note is relevant, synonyms included); tags are optional. The per-prompt hints match only on these fields, so choose them with care; search_notes also reads note bodies.`
 
 export const register: Register = (on, options) => {
-  const directory = String(options.directory ?? '').trim() || '~/simple-memory'
+  const directory = normalize(String(options.directory ?? '').trim() || '~/simple-memory')
   const maxHints = Math.max(0, Math.floor(Number(options.maxHints ?? 5)))
   const nudgeAfter = Math.max(0, Math.floor(Number(options.nudgeAfterFiles ?? 3)))
   const recentCount = Math.max(0, Math.floor(Number(options.recentNotes ?? 10)))
@@ -103,15 +104,15 @@ export const register: Register = (on, options) => {
 
   const { index, isWarm, partial, cached, forget } = createIndexer(extra)
 
-  const rootPath = (home: string, cwd: string): string => {
-    let dir = directory
-    if (dir === '~' || dir.startsWith('~/')) dir = home + dir.slice(1)
-    else if (!dir.startsWith('/') && !/^[A-Za-z]:/.test(dir)) dir = `${cwd}/${dir}`
-    return dir.replace(/[\\/]+$/, '')
-  }
-
   const needsHome = directory === '~' || directory.startsWith('~/')
-  const needsCwd = !needsHome && !directory.startsWith('/') && !/^[A-Za-z]:/.test(directory)
+  const needsCwd = !needsHome && !isAbsolute(directory)
+
+  /** The memory root, always with forward slashes (Windows file APIs accept them). */
+  const rootPath = (home: string, cwd: string): string => {
+    if (needsHome) return normalize(home + directory.slice(1))
+    if (needsCwd) return normalize(`${cwd}/${directory}`)
+    return directory
+  }
 
   const rootOf = async (io: Io): Promise<string> =>
     rootPath(needsHome ? ((await io.home()) ?? '') : '', needsCwd ? await io.cwd() : '')
@@ -135,7 +136,7 @@ export const register: Register = (on, options) => {
   /** A note by id, path (with or without `.md`) or title, case-insensitive. */
   const find = (notes: readonly Note[], query: string, root: string): Note | undefined => {
     let wanted = query.trim().replace(/^\[\[|\]\]$/g, '').replace(/\\/g, '/')
-    if (wanted.startsWith(`${root}/`)) wanted = wanted.slice(root.length + 1)
+    wanted = relativeTo(wanted, root) ?? wanted
     const lower = idOf(wanted).toLowerCase()
     return (
       notes.find(note => note.id.toLowerCase() === lower) ??
@@ -428,7 +429,8 @@ export const register: Register = (on, options) => {
       return refuse(`${idOf(rel)} already exists. Read it and use edit_note, or pass overwrite: true.`)
     }
     const now = await nowIso(io)
-    const previous = exists ? parse(String(await io.read(abs).catch(() => '')), title).meta : undefined
+    const before = exists ? parse(String(await io.read(abs).catch(() => '')), title) : undefined
+    const previous = before?.meta
     await saveNote(io, root, rel, {
       meta: {
         title,
@@ -440,6 +442,7 @@ export const register: Register = (on, options) => {
         rest: previous?.rest ?? [],
       },
       body: str(args.content),
+      eol: before?.eol,
     })
     await markRead(io, [{ id: idOf(rel), title }])
     return answer(`${exists ? 'Replaced' : 'Created'} ${idOf(rel)} (${abs}).`)
@@ -505,6 +508,7 @@ export const register: Register = (on, options) => {
     await saveNote(io, root, note.rel, {
       meta: { ...parsed.meta, title, summary, keywords: keywordList, tags, updated: await nowIso(io) },
       body,
+      eol: parsed.eol,
     })
     await markRead(io, [{ id: note.id, title }])
 
@@ -537,7 +541,11 @@ export const register: Register = (on, options) => {
     const parsed = parse(await io.read(note.abs), note.title)
     const title = str(args.title).trim() || parsed.meta.title
     const id = idOf(rel)
-    await saveNote(io, root, rel, { meta: { ...parsed.meta, title, updated: await nowIso(io) }, body: parsed.body })
+    await saveNote(io, root, rel, {
+      meta: { ...parsed.meta, title, updated: await nowIso(io) },
+      body: parsed.body,
+      eol: parsed.eol,
+    })
     if (rel !== note.rel) {
       await io.remove(note.abs)
       forget(note.abs)
@@ -678,12 +686,7 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
-      remove: async path => {
-        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
-        if (ran?.exitCode === 0) return
-        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
-        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
-      },
+      remove: path => removeFile(argv => $.process.run(argv), file => $.fs.exists(file), path),
       forget: async id => {
         await update($, suggested, list => list.filter(one => one.id !== id))
         await update($, readNotes, list => list.filter(one => one.id !== id))
@@ -715,12 +718,7 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
-      remove: async path => {
-        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
-        if (ran?.exitCode === 0) return
-        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
-        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
-      },
+      remove: path => removeFile(argv => $.process.run(argv), file => $.fs.exists(file), path),
       forget: async id => {
         await update($, suggested, list => list.filter(one => one.id !== id))
         await update($, readNotes, list => list.filter(one => one.id !== id))
@@ -731,8 +729,9 @@ export const register: Register = (on, options) => {
       },
     }
     const root = await rootOf(io)
-    if (ran.deny === undefined && !ran.isError && e.file_path.startsWith(`${root}/`) && /\.md$/i.test(e.file_path)) {
-      const note = find(await index(io, root), e.file_path, root)
+    const rel = relativeTo(e.file_path, root)
+    if (ran.deny === undefined && !ran.isError && rel !== undefined && /\.md$/i.test(rel)) {
+      const note = find(await index(io, root), rel, root)
       if (note) await markRead(io, [refOf(note)])
     }
     return ran
@@ -749,12 +748,7 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
-      remove: async path => {
-        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
-        if (ran?.exitCode === 0) return
-        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
-        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
-      },
+      remove: path => removeFile(argv => $.process.run(argv), file => $.fs.exists(file), path),
       forget: async id => {
         await update($, suggested, list => list.filter(one => one.id !== id))
         await update($, readNotes, list => list.filter(one => one.id !== id))
@@ -785,12 +779,7 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
-      remove: async path => {
-        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
-        if (ran?.exitCode === 0) return
-        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
-        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
-      },
+      remove: path => removeFile(argv => $.process.run(argv), file => $.fs.exists(file), path),
       forget: async id => {
         await update($, suggested, list => list.filter(one => one.id !== id))
         await update($, readNotes, list => list.filter(one => one.id !== id))
@@ -822,12 +811,7 @@ export const register: Register = (on, options) => {
       cwd: () => $.session.cwd(),
       markRead: async refs => void (await update($, readNotes, list => merge(list, refs))),
       invalidateContext: () => void $.ui.invalidate('prompt.context'),
-      remove: async path => {
-        const ran = await $.process.run(['rm', '-f', '--', path]).catch(() => undefined)
-        if (ran?.exitCode === 0) return
-        const win = await $.process.run(['cmd', '/c', 'del', '/f', '/q', path.replace(/\//g, '\\')]).catch(() => undefined)
-        if (win?.exitCode !== 0) throw new Error(`could not delete ${path}${ran ? `: ${ran.stderr.trim()}` : ''}`)
-      },
+      remove: path => removeFile(argv => $.process.run(argv), file => $.fs.exists(file), path),
       forget: async id => {
         await update($, suggested, list => list.filter(one => one.id !== id))
         await update($, readNotes, list => list.filter(one => one.id !== id))
@@ -876,8 +860,13 @@ export const register: Register = (on, options) => {
     const home = needsHome ? ((await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '') : ''
     const root = rootPath(home, needsCwd ? await $.session.cwd() : '')
     // A note file written by hand is a note, not work waiting for one.
-    if (path.startsWith(`${root}/`) && /\.md$/i.test(path)) await update($, edited, () => [])
-    else await update($, edited, list => (list.includes(path) ? list : [...list, path]))
+    const rel = relativeTo(path, root)
+    if (rel !== undefined && /\.md$/i.test(rel)) await update($, edited, () => [])
+    else {
+      // One file, however a tool spelled its path, counts once.
+      const file = normalize(path)
+      await update($, edited, list => (list.some(one => pathKey(one) === pathKey(file)) ? list : [...list, file]))
+    }
     return ran
   }).catch(($, e, next) => next(e)) // fail open: a bookkeeping error never blocks the call
 

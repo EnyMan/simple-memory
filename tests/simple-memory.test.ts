@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 
 import { keywords } from '../hooks/keywords'
 import { parse, replaceSection, serialize, slugify } from '../hooks/notes'
+import { normalize, pathKey, relativeTo, removeFile } from '../hooks/paths'
 
 const ROOT = '/mem'
 const OPTIONS = { options: { directory: ROOT } }
@@ -21,6 +22,13 @@ const BAND_PROPS = {
   view: {},
 }
 
+/**
+ * A Windows path as the plugin asked for it. On Linux, where these tests run,
+ * the engine resolves `C:/…` against the working directory before a hook sees
+ * it (on Windows it is absolute already), so the drive is cut back out here.
+ */
+const drive = (path: string) => path.replace(/^.*?\/(?=[A-Za-z]:\/)/, '')
+
 /** An in-memory file system beneath the plugin. */
 const memoryFs = (on: On, files: Record<string, string> = {}, gate?: Promise<void>, reads = { count: 0 }) => {
   const store = new Map(Object.entries(files))
@@ -31,21 +39,25 @@ const memoryFs = (on: On, files: Record<string, string> = {}, gate?: Promise<voi
   on('fs.read', async ($, e) => {
     await gate
     reads.count += 1
-    const text = store.get(e.path)
+    const text = store.get(drive(e.path))
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text }
   })
   on('fs.write', ($, e) => {
-    store.set(e.path, e.text)
-    mtimes.set(e.path, tick++)
+    store.set(drive(e.path), e.text)
+    mtimes.set(drive(e.path), tick++)
     return { value: undefined }
   })
-  on('fs.exists', ($, e) => ({ value: store.has(e.path) || isDir(e.path) }))
+  on('fs.exists', ($, e) => {
+    const path = drive(e.path)
+    return { value: store.has(path) || isDir(path) }
+  })
   on('fs.list', ($, e) => {
-    if (!isDir(e.path)) return { deny: `ENOENT: ${e.path}` }
+    const dir = drive(e.path)
+    if (!isDir(dir)) return { deny: `ENOENT: ${dir}` }
     const names = new Map<string, 'file' | 'dir'>()
     for (const file of store.keys()) {
-      if (!file.startsWith(`${e.path}/`)) continue
-      const [name, ...rest] = file.slice(e.path.length + 1).split('/')
+      if (!file.startsWith(`${dir}/`)) continue
+      const [name, ...rest] = file.slice(dir.length + 1).split('/')
       if (name) names.set(name, rest.length > 0 ? 'dir' : 'file')
     }
     return {
@@ -53,16 +65,25 @@ const memoryFs = (on: On, files: Record<string, string> = {}, gate?: Promise<voi
         name,
         kind,
         size: 0,
-        mtimeMs: kind === 'file' ? (mtimes.get(`${e.path}/${name}`) ?? 0) : 0,
+        mtimeMs: kind === 'file' ? (mtimes.get(`${dir}/${name}`) ?? 0) : 0,
         isLink: false,
       })),
     }
   })
   on('process.run', ($, e) => {
-    const [command, , , path] = e.argv
-    const isRemoved = command === 'rm' && path !== undefined && store.delete(path)
+    const [command] = e.argv
+    let exitCode = 1
+    if (command === 'rm') {
+      const path = e.argv[3]
+      exitCode = path !== undefined && store.delete(path) ? 0 : 1
+    } else if (command === 'cmd') {
+      // Like the real del: exit 0 whether or not anything was deleted.
+      const path = e.argv[5]?.replace(/\\/g, '/')
+      if (path !== undefined) store.delete(path)
+      exitCode = 0
+    }
     return {
-      value: { exitCode: isRemoved ? 0 : 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+      value: { exitCode, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     }
   })
   return store
@@ -110,6 +131,18 @@ describe('notes', () => {
     expect(again.body.trim()).toBe('Body')
   })
 
+  test('keeps Windows line endings', () => {
+    const crlf = '---\r\ntitle: T\r\nkeywords: [a, b, c]\r\n---\r\n\r\n# T\r\n\r\n## A\r\n\r\nold\r\n'
+    const parsed = parse(crlf, 'f')
+    expect(parsed.eol).toBe('\r\n')
+    expect(parsed.meta.keywords).toEqual(['a', 'b', 'c'])
+    expect(parsed.body).not.toContain('\r')
+    const edited = serialize({ ...parsed, body: replaceSection(parsed.body, 'A', 'new') })
+    expect(edited).toContain('## A\r\n\r\nnew\r\n')
+    expect(edited.replace(/\r\n/g, '')).not.toContain('\n')
+    expect(serialize(parse('---\ntitle: T\n---\n\nx\n', 'f'))).not.toContain('\r')
+  })
+
   test('title falls back to the first heading', () => {
     expect(parse('# Hello there\n\ntext', 'f').meta.title).toBe('Hello there')
   })
@@ -122,6 +155,44 @@ describe('notes', () => {
 
   test('slugify', () => {
     expect(slugify('Použít Postgres? Ano!')).toBe('pouzit-postgres-ano')
+  })
+})
+
+describe('paths', () => {
+  test('normalize', () => {
+    expect(normalize('C:\\Users\\me\\memory\\')).toBe('C:/Users/me/memory')
+    expect(normalize('c:/Users//me')).toBe('C:/Users/me')
+    expect(normalize('\\\\server\\share\\notes')).toBe('//server/share/notes')
+    expect(normalize('/home/me//memory/')).toBe('/home/me/memory')
+    expect(normalize('~\\notes')).toBe('~/notes')
+  })
+
+  test('relativeTo: Windows ignores case and separators; Unix does not', () => {
+    expect(relativeTo('c:\\users\\ME\\memory\\Decisions\\x.md', 'C:/Users/me/memory')).toBe('Decisions/x.md')
+    expect(relativeTo('C:\\Users\\me\\memory-old\\x.md', 'C:/Users/me/memory')).toBeUndefined()
+    expect(relativeTo('/home/me/memory/a/x.md', '/home/me/memory')).toBe('a/x.md')
+    expect(relativeTo('/home/me/Memory/a/x.md', '/home/me/memory')).toBeUndefined()
+    expect(pathKey('C:\\Src\\A.ts')).toBe(pathKey('c:/src/a.ts'))
+    expect(pathKey('/src/A.ts')).not.toBe(pathKey('/src/a.ts'))
+  })
+
+  test('removeFile checks the file is gone, since del exits 0 regardless', async () => {
+    const files = new Set(['C:/m/a.md', '/m/a.md'])
+    const calls: string[] = []
+    const run = (removes: boolean) => async (argv: readonly string[]) => {
+      calls.push(argv.join(' '))
+      if (removes) files.delete(argv[0] === 'cmd' ? argv[5]!.replace(/\\/g, '/') : argv[3]!)
+      return { exitCode: 0, stderr: '' }
+    }
+    const exists = async (path: string) => files.has(path)
+
+    await removeFile(run(true), exists, 'C:/m/a.md')
+    expect(calls).toEqual(['cmd /c del /f /q C:\\m\\a.md'])
+    await removeFile(run(true), exists, '/m/a.md')
+    expect(calls.at(-1)).toBe('rm -f -- /m/a.md')
+
+    files.add('C:/m/b.md')
+    await expect(removeFile(run(false), exists, 'C:/m/b.md')).rejects.toThrow('could not delete C:/m/b.md')
   })
 })
 
@@ -423,5 +494,72 @@ describe('plugin', () => {
     expect(contexts[1]?.join('\n') ?? '').toContain('decisions/use-postgres')
     // The 3 notes were read once, by that first walk: nothing read them again.
     expect(reads.count).toBe(3)
+  })
+
+  test('a Windows memory folder: backslash paths from tools, del, CRLF notes', { options: { directory: 'C:\\Users\\me\\memory', nudgeAfterFiles: 2 } }, async ($, on) => {
+    const WIN = 'C:/Users/me/memory'
+    const files = memoryFs(on, {
+      [`${WIN}/decisions/use-postgres.md`]:
+        '---\r\ntitle: Use Postgres for storage\r\nsummary: Why Postgres.\r\nkeywords: [postgres, database, storage]\r\n---\r\n\r\n## Why\r\n\r\nJSONB.\r\n',
+      [`${WIN}/how-to/deploy.md`]: '---\ntitle: Deploy\nsummary: How to deploy.\nkeywords: [deploy, release, ship]\n---\n\nSteps.\n',
+    })
+    mock.clock(on, { now: Date.UTC(2026, 9, 5) })
+    let surfaces: string[] = ['terminal']
+    on('session.surfaces', () => ({ value: surfaces as never }))
+    on('tool.call', ($, e) => ({ result: `ran ${e.tool}` }))
+    on('turn.complete', ($, e) => ({ text: e.answer }))
+    const prompts: string[] = []
+    on('prompt.submit', ($, e) => {
+      prompts.push(e.text)
+      return { text: e.text }
+    })
+    const turn = { answer: 'done', durationMs: 1, isAborted: false, turnId: 't', reason: 'answer' } as const
+    const edit = (file_path: string) =>
+      $.tool.call({ tool: 'Edit', file_path, old_string: 'a', new_string: 'b', replace_all: false })
+
+    // A full Windows path, in any case, finds the note.
+    const read = await $.tool.call({
+      tool: 'mcp__simple-memory__read_note',
+      notes: ['c:\\users\\me\\memory\\decisions\\use-postgres.md'],
+    })
+    expect(String(read.result)).toContain('# decisions/use-postgres')
+
+    // The Read tool's backslash path marks the note read.
+    await $.tool.call({ tool: 'Read', file_path: 'C:\\Users\\me\\memory\\how-to\\deploy.md' })
+    const ui = await $.ui.mount({ plugin: 'simple-memory', surface: 'terminal', component: 'AbovePrompt', props: BAND_PROPS })
+    expect(await ui.find({ key: 'read:how-to/deploy' })).toBeDefined()
+    await ui.unmount()
+
+    // One file in two spellings counts once; a note edited by hand resets the count.
+    await edit('C:\\src\\a.ts')
+    await edit('c:/SRC/A.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(0)
+    await edit('C:\\Users\\me\\memory\\how-to\\deploy.md')
+    await edit('C:\\src\\b.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(0)
+    await edit('C:\\src\\c.ts')
+    await $.turn.complete(turn)
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('- C:/src/b.ts')
+
+    // Editing a CRLF note keeps CRLF.
+    await $.tool.call({
+      tool: 'mcp__simple-memory__edit_note',
+      note: 'decisions/use-postgres',
+      operation: 'replace_section',
+      section: 'Why',
+      content: 'JSONB and ops familiarity.',
+    })
+    const after = files.get(`${WIN}/decisions/use-postgres.md`) ?? ''
+    expect(after).toContain('## Why\r\n\r\nJSONB and ops familiarity.\r\n')
+    expect(after.replace(/\r\n/g, '')).not.toContain('\n')
+
+    // Deleting goes through del, and is checked.
+    const deleted = await $.tool.call({ tool: 'mcp__simple-memory__delete_note', note: 'how-to/deploy' })
+    expect(String(deleted.result)).toContain('Deleted how-to/deploy')
+    expect(files.has(`${WIN}/how-to/deploy.md`)).toBe(false)
+    surfaces = []
   })
 })

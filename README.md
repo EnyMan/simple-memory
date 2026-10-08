@@ -36,8 +36,14 @@ them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update
 | **Memory nudge** | Edits made with Edit, Write, MultiEdit and NotebookEdit are tracked as a set of distinct files. When a main-session turn ends with a normal answer and 3+ files have been edited since the last note, the plugin starts one follow-up turn asking Claude whether there is a non-obvious learning or a finished chunk worth recording, and to reply "No note needed." otherwise. Never in headless (`-p`/SDK) runs, after subagent turns, or after interrupted or failed turns. Writing, editing or moving a note (or editing a note file directly) resets the count. The count survives plugin reloads and resets on `/clear`. Bash, research and reading don't count. |
 | **`/memory-init`** | A guided interview: Claude asks what the knowledge base is for (a general shared team KB, a personal second brain, project docs, research…), proposes a folder tree and conventions, revises it with you, then writes `MEMORY.md` and creates the folders. Run it again later to restructure. You can pass a head start: `/memory-init shared wiki for the platform team`. |
 
-Opening a note with the built-in Read tool also marks it as read. Deleting uses `rm` (or `del` on
-Windows), since the plugin API has no file delete.
+Opening a note with the built-in Read tool also marks it as read. Deleting uses `rm` (`del` on
+Windows), since the plugin API has no file delete, and checks that the file is gone afterwards.
+
+Meant for macOS, Linux and Windows (the Windows handling is covered by tests that use Windows
+paths, run on Linux). The plugin builds paths with forward slashes, which Windows
+accepts, and compares paths it gets from other tools (`C:\Users\…`) without regard to separator,
+or to case on Windows. Notes keep their own line endings (`\r\n` or `\n`) when edited. The
+`directory` option takes either kind of path (`~\notes`, `C:\kb`, `\\server\share\kb`).
 
 ## Notes on disk
 
