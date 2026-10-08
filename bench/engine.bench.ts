@@ -2,15 +2,17 @@
 // engine's own dispatch, over an in-memory file system beneath the plugin.
 // Not a *.test.ts so `claude plugin test .` skips it: bench/run.ts copies it
 // into a scratch copy of the plugin as tests/engine.test.ts, replacing
-// __SIZES__, and reads the BENCH lines it prints.
+// __SIZES__ and __LAYOUT__, and reads the BENCH lines it prints.
 
 import { mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { corpus, PROMPTS } from '../bench/corpus'
+import type { Layout } from '../bench/corpus'
 
 const ROOT = '/mem'
 const SIZES: number[] = __SIZES__
+const LAYOUT: Layout = __LAYOUT__
 const WARM_RUNS = 15
 
 const TYPED = { wait: false, origin: { kind: 'composer' } } as const
@@ -67,7 +69,7 @@ for (const n of SIZES) {
   test(`engine prompt.submit, ${n} notes`, { options: { directory: ROOT }, timeoutMs: 600_000 }, async ($, on) => {
     const files = new Map<string, string>()
     const mtimes = new Map<string, number>()
-    for (const note of corpus(n)) {
+    for (const note of corpus(n, { layout: LAYOUT })) {
       files.set(`${ROOT}/${note.rel}`, note.text)
       mtimes.set(`${ROOT}/${note.rel}`, 1)
     }
