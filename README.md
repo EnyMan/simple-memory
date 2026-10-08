@@ -75,17 +75,20 @@ plain files, the folder can be a git repository that a team shares.
 
 ## Performance
 
-Measured with `bun bench/run.ts` on synthetic knowledge bases (median, through Claude Code's plugin
-engine; full results and method in [bench/README.md](bench/README.md)):
+Measured with `bun bench/run.ts` on synthetic knowledge bases laid out like a real one (60 folders,
+3 deep). These are medians through Claude Code's plugin engine; full results, the method and a
+worst-case layout are in [bench/README.md](bench/README.md):
 
 | | 100 notes | 1,000 notes | 5,000 notes |
 | --- | ---: | ---: | ---: |
-| First prompt of a session (the index builds in the background) | 6 ms | 2 ms | 1 ms |
-| Background index build, until complete | 133 ms | 659 ms | 1.4 s |
-| Later prompts | 20 ms | 83 ms | 171 ms |
-| `search_notes` (frontmatter + full text) | 19 ms | 98 ms | 259 ms |
+| First prompt of a session (the index builds in the background) | 5 ms | 2 ms | 2 ms |
+| Background index build, until complete | 100 ms | 470 ms | 1.6 s |
+| Later prompts | 31 ms | 27 ms | 66 ms |
+| `search_notes` (frontmatter + full text) | 26 ms | 38 ms | 130 ms |
 
-Until the background build completes, hints cover only the notes read so far.
+Until the background build completes, hints cover only the notes read so far. Each prompt lists
+every folder once, so folders count as much as notes: 5,000 notes in 60 folders cost about what
+1,000 notes in 345 folders do (66 vs 72 ms).
 
 ## Options
 

@@ -11,6 +11,7 @@ From the repository root, with [Bun](https://bun.sh) and `claude` on the PATH:
 bun bench/run.ts                          # 100, 1,000 and 5,000 notes; disk + engine; prints a markdown table
 bun bench/run.ts --sizes 100,2000         # other sizes
 bun bench/run.ts --skip-engine --json     # disk part only, raw rows as JSON
+bun bench/run.ts --layout wide            # the walk's worst case: 1,162 folders at 5,000 notes
 ```
 
 A full run takes about 2 minutes. Everything is written to a temp directory and removed afterwards.
@@ -18,8 +19,15 @@ A full run takes about 2 minutes. Everything is written to a temp directory and 
 ## What it measures
 
 - **Corpus** (`bench/corpus.ts`): deterministic synthetic notes with frontmatter (title, a one-line
-  summary, 3 to 12 keywords, 1 to 3 tags), spread over 8 top-level folders, 40% of them one level
-  deeper (1,164 folders at 5,000 notes, far more than a real knowledge base; see [#5](https://github.com/EnyMan/simple-memory/issues/5)). Bodies are 1 to 20 KB
+  summary, 3 to 12 keywords, 1 to 3 tags) in one of two folder layouts:
+  - `realistic` (the default), modelled on a real basic-memory knowledge base: 13 top-level
+    folders plus `projects/` with 23 projects, each with a `progress/` folder. That's 60 folders,
+    3 deep. Half the notes go under `projects/`, half of those into `progress/`.
+  - `wide`: 8 top-level folders with 40% of notes one level deeper, under one of 200 random names
+    each. That's 1,162 folders at 5,000 notes, and the layout of the runs before
+    [#5](https://github.com/EnyMan/simple-memory/issues/5).
+
+  Bodies are 1 to 20 KB
   (log-uniform, about 6.6 KB on average) of Zipf-distributed words drawn from an 8,000-word
   vocabulary. 5,000 notes come to about 33 MB.
 - **disk** rows: the plugin's own `hooks/indexer.ts` and `hooks/keywords.ts`, run in Bun against
@@ -40,19 +48,85 @@ A full run takes about 2 minutes. Everything is written to a temp directory and 
 
 ## Results
 
-Median / p95 in ms. Intel Xeon @ 2.80 GHz (4 threads), 16 GB, Linux 6.18, Bun 1.3.14,
-Claude Code 2.1.289. One run of each cold measurement through the engine. The dispatch floor's
-p95 is its first call warming up; the median is the steady state.
+Median / p95 in ms, Bun 1.3.14, Claude Code 2.1.289, Linux 6.18. One run of each cold measurement
+through the engine. The dispatch floor's p95 is its first call warming up; the median is the steady
+state. Each table names its machine; compare rows within a table rather than across tables.
 
-### Current: first walk in the background ([#4](https://github.com/EnyMan/simple-memory/issues/4))
+### Current: realistic folder layout ([#5](https://github.com/EnyMan/simple-memory/issues/5))
+
+Same code as [#4](https://github.com/EnyMan/simple-memory/issues/4), measured on both layouts on
+one machine (Intel Xeon @ 2.10 GHz, 4 threads, 16 GB).
+
+**`realistic` layout (60 folders):**
+
+| measurement | 100 notes | 1,000 notes | 5,000 notes |
+| --- | ---: | ---: | ---: |
+| disk: index, cold (parse every note) | 12.7 / 23.3 | 51.0 / 89.7 | 310 / 335 |
+| disk: index, warm (walk + stat only) | 6.23 / 9.15 | 9.71 / 10.7 | 28.8 / 56.8 |
+| disk: index, one note changed | 6.10 / 8.14 | 8.93 / 10.5 | 24.1 / 29.7 |
+| scoring: keywords + relevant() (frontmatter) | 0.06 / 0.18 | 1.26 / 2.22 | 8.52 / 14.7 |
+| search: frontmatter + full text over all notes | 3.53 / 6.02 | 33.8 / 61.0 | 179 / 324 |
+| disk: whole hint path, warm | 5.75 / 8.22 | 12.3 / 21.8 | 50.8 / 70.8 |
+| engine: no-keyword prompt (dispatch floor) | 0.53 / 246 | 0.47 / 91.5 | 0.51 / 99.3 |
+| engine: first prompt (walk runs in background) | 5.15 | 2.27 | 1.79 |
+| engine: first walk, until complete (background) | 100 | 470 | 1588 |
+| engine: later prompt (warm index) | 31.2 / 41.5 | 27.1 / 34.9 | 65.7 / 118 |
+| engine: prompt after one note changed | 22.3 / 25.9 | 30.1 / 42.4 | 57.1 / 71.7 |
+| engine: search_notes (warm index) | 25.7 / 42.1 | 37.7 / 52.2 | 130 / 214 |
+
+**`wide` layout (1,162 folders at 5,000 notes), same machine:**
+
+| measurement | 100 notes | 1,000 notes | 5,000 notes |
+| --- | ---: | ---: | ---: |
+| disk: index, cold (parse every note) | 14.9 / 19.8 | 103 / 119 | 426 / 448 |
+| disk: index, warm (walk + stat only) | 5.16 / 10.1 | 41.4 / 102 | 161 / 239 |
+| disk: index, one note changed | 4.96 / 6.32 | 41.7 / 44.1 | 146 / 202 |
+| scoring: keywords + relevant() (frontmatter) | 0.06 / 0.16 | 1.24 / 1.99 | 8.62 / 12.7 |
+| search: frontmatter + full text over all notes | 3.77 / 5.74 | 38.5 / 61.8 | 190 / 296 |
+| disk: whole hint path, warm | 5.76 / 7.78 | 47.6 / 72.5 | 186 / 238 |
+| engine: no-keyword prompt (dispatch floor) | 0.54 / 129 | 0.70 / 135 | 0.41 / 90.1 |
+| engine: first prompt (walk runs in background) | 4.41 | 2.23 | 1.68 |
+| engine: first walk, until complete (background) | 79.4 | 724 | 1309 |
+| engine: later prompt (warm index) | 26.0 / 49.3 | 71.8 / 93.2 | 172 / 190 |
+| engine: prompt after one note changed | 20.9 / 27.4 | 55.7 / 117 | 158 / 212 |
+| engine: search_notes (warm index) | 21.2 / 39.8 | 66.0 / 120 | 250 / 378 |
+
+- **The folder count drove warm-prompt cost.** With the realistic layout a later prompt costs 66 ms
+  at 5,000 notes instead of 172 ms (27 ms instead of 72 ms at 1,000), because the walk makes one
+  `$.fs.list` per folder: 60 instead of about 1,160. What remains is the per-file mtime check and
+  scoring (9 ms).
+- **The first walk is unchanged by the layout**: 0.5 s at 1,000 notes and 1.3 to 1.6 s at 5,000,
+  dominated by reading every file once. Since [#4](https://github.com/EnyMan/simple-memory/issues/4)
+  it runs in the background and no prompt waits for it.
+
+### Decision: no persisted index (for now)
+
+[#5](https://github.com/EnyMan/simple-memory/issues/5) asked whether the index should also live on
+disk, as an mtime-checked cache (path → mtime, title, summary, keywords, tags) that a new session
+loads instead of reading every note. The threshold set there was a cold walk over 1 s at 5,000
+notes. It is 1.6 s, but that threshold was set while the first walk blocked the first prompt. Since
+[#4](https://github.com/EnyMan/simple-memory/issues/4) it doesn't, so what a cache would buy is a
+shorter window (about 1.5 s at 5,000 notes, 0.4 s at 1,000) in which hints cover only part of the
+knowledge base. Against that:
+
+- It's a second copy of the frontmatter that must stay right: written whole after each walk,
+  validated by mtime on load, and discarded when it can't be parsed.
+- Several sessions write it. Correctness doesn't need a lock (each session still walks the folders
+  and trusts an entry only while the file's mtime matches), but the sessions overwrite each
+  other's cache file and re-read what the other changed.
+- It doesn't help warm prompts, which are already about 30 to 70 ms in a realistic layout.
+
+So it's not added. Revisit if knowledge bases reach several thousand notes and the partial-hint
+window at session start becomes noticeable: the design above still applies.
+
+### First walk in the background ([#4](https://github.com/EnyMan/simple-memory/issues/4))
 
 The first walk starts at `session.start` and nothing waits for it: until it completes, the
 per-prompt hint scores whatever it has read so far, and the opening context lists recent notes
 from the directory listings alone. Tools that need the full index join the walk in progress. Walks
 are shared by concurrent callers, and a walk reads changed notes 16 at a time.
 
-Intel Xeon @ 2.10 GHz (4 threads). This is a slower machine than the earlier runs, so compare rows
-within a table rather than across tables.
+`wide` layout. Intel Xeon @ 2.10 GHz (4 threads).
 
 | measurement | 100 notes | 1,000 notes | 5,000 notes |
 | --- | ---: | ---: | ---: |
@@ -74,9 +148,11 @@ within a table rather than across tables.
   full hints once the walk completes.
 - **The background walk completes in 1.4 s at 5,000 notes** (659 ms at 1,000). Reading 16 notes at
   a time roughly halved the cold disk index (956 → 426 ms at 5,000), though the machines differ.
-- Warm prompts are still bound by the folder walk; see [#5](https://github.com/EnyMan/simple-memory/issues/5).
+- Warm prompts are still bound by the folder walk, inflated here by the `wide` layout; see the realistic layout above.
 
 ### Frontmatter-only index ([#3](https://github.com/EnyMan/simple-memory/issues/3))
+
+`wide` layout. Intel Xeon @ 2.80 GHz (4 threads).
 
 The hint indexes only each note's frontmatter (title, summary, keywords, tags) and its path.
 Bodies are kept as text and scanned by `search_notes` when it is called.
@@ -108,6 +184,8 @@ Bodies are kept as text and scanned by `search_notes` when it is called.
 
 ### Baseline: full-text index ([#2](https://github.com/EnyMan/simple-memory/pull/2))
 
+`wide` layout. Intel Xeon @ 2.80 GHz (4 threads).
+
 Before [#3](https://github.com/EnyMan/simple-memory/issues/3), the hint tokenized every note's body (up to 50,000 characters).
 
 | measurement | 100 notes | 1,000 notes | 5,000 notes |
@@ -130,8 +208,3 @@ What it showed:
    Addressed by [#3](https://github.com/EnyMan/simple-memory/issues/3).
 2. **Later prompts were bound by the walk** (one `$.fs.list` per folder and an mtime check per
    file), not by scoring. Still true; see [#5](https://github.com/EnyMan/simple-memory/issues/5).
-
-## Next
-
-- [#5](https://github.com/EnyMan/simple-memory/issues/5): make the corpus's folder layout realistic, re-measure, and decide whether a persisted,
-  mtime-checked index cache is worth adding.

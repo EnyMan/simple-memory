@@ -3,6 +3,7 @@
 //
 //   bun bench/run.ts                 # 100, 1000 and 5000 notes, disk + engine
 //   bun bench/run.ts --sizes 100,1000 --skip-engine
+//   bun bench/run.ts --layout wide       # 1,164 folders at 5,000 notes: the walk's worst case
 //
 // Disk: the plugin's own indexer (hooks/indexer.ts) and scorer
 // (hooks/keywords.ts) over a generated knowledge base written to a temp
@@ -17,7 +18,8 @@ import { join } from 'node:path'
 import { createIndexer } from '../hooks/indexer'
 import type { IndexIo } from '../hooks/indexer'
 import { keywords, relevant, search } from '../hooks/keywords'
-import { corpus, PROMPTS } from './corpus'
+import { corpus, LAYOUTS, PROMPTS } from './corpus'
+import type { Layout } from './corpus'
 
 const args = process.argv.slice(2)
 const flag = (name: string) => args.includes(name)
@@ -26,6 +28,8 @@ const value = (name: string) => {
   return at >= 0 ? args[at + 1] : undefined
 }
 const SIZES = (value('--sizes') ?? '100,1000,5000').split(',').map(Number).filter(n => n > 0)
+const LAYOUT = (value('--layout') ?? 'realistic') as Layout
+if (!LAYOUTS.includes(LAYOUT)) throw new Error(`--layout must be one of ${LAYOUTS.join(', ')}`)
 const MIN_HINT_SCORE = 1.5
 
 type Row = { n: number; name: string; median: number; p95: number; runs: number; [key: string]: unknown }
@@ -67,7 +71,7 @@ const diskIo: IndexIo = {
 
 const benchDisk = async (n: number, base: string) => {
   const root = join(base, `kb-${n}`)
-  const notes = corpus(n)
+  const notes = corpus(n, { layout: LAYOUT })
   for (const note of notes) {
     const path = join(root, note.rel)
     await mkdir(join(path, '..'), { recursive: true })
@@ -129,7 +133,9 @@ const benchEngine = async (sizes: number[], base: string) => {
   await cp('bench/corpus.ts', join(plugin, 'bench/corpus.ts'))
   await mkdir(join(plugin, 'tests'), { recursive: true })
   const template = await readFile('bench/engine.bench.ts', 'utf8')
-  await writeFile(join(plugin, 'tests/engine.test.ts'), template.replace('= __SIZES__', `= ${JSON.stringify(sizes)}`))
+  await writeFile(join(plugin, 'tests/engine.test.ts'), template
+      .replace('= __SIZES__', `= ${JSON.stringify(sizes)}`)
+      .replace('= __LAYOUT__', `= ${JSON.stringify(LAYOUT)}`))
 
   console.error(`\nengine (claude plugin test, in-memory fs), sizes ${sizes.join(', ')}`)
   const child = Bun.spawn(['claude', 'plugin', 'test', plugin], { stdout: 'pipe', stderr: 'pipe' })
@@ -164,7 +170,7 @@ const markdown = () => {
     })
     return `| ${name} | ${cells.join(' | ')} |`
   })
-  return [`Median / p95 in ms. ${machine()}.`, '', head, rule, ...body].join('\n')
+  return [`Median / p95 in ms, ${LAYOUT} layout. ${machine()}.`, '', head, rule, ...body].join('\n')
 }
 
 const base = await mkdtemp(join(tmpdir(), 'simple-memory-bench-'))

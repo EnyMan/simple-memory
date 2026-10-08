@@ -31,7 +31,20 @@ release testing performance docs api database cache queue search analytics compl
 roadmap budget vendor tooling`
   .split(/\s+/)
   .filter(Boolean)
-const FOLDERS = ['decisions', 'how-to', 'concepts', 'projects', 'people', 'references', 'meetings', 'inbox']
+/**
+ * `realistic`: a real knowledge base's shape, 14 top-level folders and 23
+ * projects (placeholder names) with a progress/ folder each (60 folders, 3 deep); half the notes
+ * go under projects/, half of those into progress/. `wide`: the first
+ * benchmark's layout, 8 top-level folders with 40% of notes one level deeper
+ * under one of 200 random names each (1,164 folders at 5,000 notes), kept
+ * as a worst case for the walk.
+ */
+export type Layout = 'realistic' | 'wide'
+export const LAYOUTS: readonly Layout[] = ['realistic', 'wide']
+
+const WIDE_FOLDERS = ['decisions', 'how-to', 'concepts', 'projects', 'people', 'references', 'meetings', 'inbox']
+const TOP_FOLDERS = `business data decisions drawings evaluations glossary gotchas inbox meta patterns people person runbooks`.split(' ')
+const PROJECTS = Array.from({ length: 23 }, (_, i) => `project-${String(i + 1).padStart(2, '0')}`)
 
 /** A vocabulary of real-looking common words plus invented rarer ones. */
 const vocabulary = (random: () => number, size: number) => {
@@ -63,7 +76,7 @@ const zipf = (random: () => number, size: number) => {
   }
 }
 
-export type CorpusOptions = { seed?: number; minBytes?: number; maxBytes?: number; vocabulary?: number }
+export type CorpusOptions = { seed?: number; minBytes?: number; maxBytes?: number; vocabulary?: number; layout?: Layout }
 
 export const corpus = (count: number, options: CorpusOptions = {}): CorpusNote[] => {
   const random = rng(options.seed ?? 42)
@@ -79,9 +92,17 @@ export const corpus = (count: number, options: CorpusOptions = {}): CorpusNote[]
     const titleWords = Array.from({ length: 3 + Math.floor(random() * 4) }, word)
     const title = titleWords.map(w => w[0]!.toUpperCase() + w.slice(1)).join(' ') + ` ${n}`
     const tags = [...new Set(Array.from({ length: 1 + Math.floor(random() * 3) }, () => TAGS[Math.floor(random() * TAGS.length)]!))]
-    const folder = FOLDERS[Math.floor(random() * FOLDERS.length)]!
-    const sub = random() < 0.4 ? `/${words[Math.floor(random() * 200)]}` : ''
-    let rel = `${folder}${sub}/${titleWords.join('-')}-${n}.md`
+    let folder: string
+    if ((options.layout ?? 'realistic') === 'wide') {
+      const top = WIDE_FOLDERS[Math.floor(random() * WIDE_FOLDERS.length)]!
+      folder = random() < 0.4 ? `${top}/${words[Math.floor(random() * 200)]}` : top
+    } else if (random() < 0.5) {
+      const project = PROJECTS[Math.floor(random() * PROJECTS.length)]!
+      folder = random() < 0.5 ? `projects/${project}/progress` : `projects/${project}`
+    } else {
+      folder = TOP_FOLDERS[Math.floor(random() * TOP_FOLDERS.length)]!
+    }
+    let rel = `${folder}/${titleWords.join('-')}-${n}.md`
     while (used.has(rel)) rel = rel.replace(/\.md$/, '-x.md')
     used.add(rel)
 
