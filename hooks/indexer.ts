@@ -74,47 +74,111 @@ export const buildNote = (
   }
 }
 
-/** An index with its own cache of parsed notes by absolute path. */
-export const createIndexer = (extra?: ReadonlySet<string>) => {
-  const cache = new Map<string, Note>()
+/** A markdown note file found by a walk, before it is read. */
+export type NoteFile = { abs: string; rel: string; mtimeMs: number }
 
-  /** Every note under the root, from the cache where the file has not changed. */
-  const index = async (io: IndexIo, root: string): Promise<Note[]> => {
-    if (!(await io.exists(root))) return []
-    const notes: Note[] = []
-    const seen = new Set<string>()
-    const queue = ['']
-    while (queue.length > 0 && notes.length < MAX_FILES) {
-      const dir = queue.shift()!
-      const entries = await io.list(dir === '' ? root : `${root}/${dir}`).catch(() => [])
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
-        const rel = dir === '' ? entry.name : `${dir}/${entry.name}`
-        if (entry.kind === 'dir') {
-          queue.push(rel)
-          continue
-        }
-        if (entry.kind !== 'file' || !/\.md$/i.test(entry.name) || rel === GUIDE) continue
-        const abs = `${root}/${rel}`
-        seen.add(abs)
-        const cached = cache.get(abs)
-        if (cached && cached.mtimeMs === entry.mtimeMs) {
-          notes.push(cached)
-          continue
-        }
-        const text = await io.read(abs).catch(() => undefined)
-        if (typeof text !== 'string') continue
-        const note = buildNote(abs, rel, entry.mtimeMs, text, extra)
-        cache.set(abs, note)
-        notes.push(note)
+/** Reads in flight at once during a walk: each read is a round trip through the engine. */
+const READ_BATCH = 16
+
+/**
+ * Every note file under the root, from directory listings alone (no reads):
+ * dot-entries, node_modules and MEMORY.md skipped, at most MAX_FILES.
+ */
+export const listNotes = async (io: IndexIo, root: string): Promise<NoteFile[]> => {
+  if (!(await io.exists(root))) return []
+  const files: NoteFile[] = []
+  const queue = ['']
+  while (queue.length > 0 && files.length < MAX_FILES) {
+    const dir = queue.shift()!
+    const entries = await io.list(dir === '' ? root : `${root}/${dir}`).catch(() => [])
+    for (const entry of entries) {
+      if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
+      const rel = dir === '' ? entry.name : `${dir}/${entry.name}`
+      if (entry.kind === 'dir') queue.push(rel)
+      else if (entry.kind === 'file' && /\.md$/i.test(entry.name) && rel !== GUIDE && files.length < MAX_FILES) {
+        files.push({ abs: `${root}/${rel}`, rel, mtimeMs: entry.mtimeMs })
       }
     }
+  }
+  return files
+}
+
+/**
+ * An index with its own cache of parsed notes by absolute path.
+ *
+ * Walks are single-flight: callers asking while one runs share it, unless a
+ * note was written or forgotten after it started, in which case they get a
+ * fresh walk once it ends. The first complete walk makes the index warm;
+ * until then `partial` answers what has been read so far, so a prompt never
+ * has to wait for it.
+ */
+export const createIndexer = (extra?: ReadonlySet<string>) => {
+  const cache = new Map<string, Note>()
+  let running: { root: string; generation: number; walk: Promise<Note[]> } | undefined
+  let generation = 0
+  let warmRoot: string | undefined
+
+  const walk = async (io: IndexIo, root: string): Promise<Note[]> => {
+    const files = await listNotes(io, root)
+    const seen = new Set(files.map(file => file.abs))
+    const notes: (Note | undefined)[] = files.map(file => {
+      const cached = cache.get(file.abs)
+      return cached && cached.mtimeMs === file.mtimeMs ? cached : undefined
+    })
+    const stale = files.map((file, at) => ({ file, at })).filter(({ at }) => notes[at] === undefined)
+    for (let start = 0; start < stale.length; start += READ_BATCH) {
+      await Promise.all(
+        stale.slice(start, start + READ_BATCH).map(async ({ file, at }) => {
+          const text = await io.read(file.abs).catch(() => undefined)
+          if (typeof text !== 'string') return
+          const note = buildNote(file.abs, file.rel, file.mtimeMs, text, extra)
+          cache.set(file.abs, note)
+          notes[at] = note
+        }),
+      )
+    }
     for (const key of [...cache.keys()]) if (key.startsWith(`${root}/`) && !seen.has(key)) cache.delete(key)
-    return notes
+    return notes.filter((note): note is Note => note !== undefined)
   }
 
-  /** Drops a file from the cache, so the next walk reads it again. */
-  const forget = (abs: string) => void cache.delete(abs)
+  /** Every note under the root, from the cache where the file has not changed. */
+  const index = (io: IndexIo, root: string): Promise<Note[]> => {
+    if (running && running.root === root) {
+      if (running.generation === generation) return running.walk
+      // Something changed since this walk began: walk again after it.
+      return running.walk.then(
+        () => index(io, root),
+        () => index(io, root),
+      )
+    }
+    const mine = { root, generation, walk: walk(io, root) }
+    running = mine
+    void mine.walk.then(
+      () => {
+        if (mine.generation === generation) warmRoot = root
+      },
+      () => undefined,
+    )
+    void mine.walk.finally(() => {
+      if (running === mine) running = undefined
+    }).catch(() => undefined)
+    return mine.walk
+  }
 
-  return { index, forget }
+  /** Whether a walk of `root` has completed: from then on a walk only re-reads changed notes. */
+  const isWarm = (root: string) => warmRoot === root
+
+  /** The notes of `root` read so far, complete or not; for callers that must not wait. */
+  const partial = (root: string): Note[] => [...cache.values()].filter(note => note.abs.startsWith(`${root}/`))
+
+  /** The note cached for a path, if any. */
+  const cached = (abs: string) => cache.get(abs)
+
+  /** Drops a file from the cache, so the next walk reads it again. */
+  const forget = (abs: string) => {
+    cache.delete(abs)
+    generation += 1
+  }
+
+  return { index, isWarm, partial, cached, forget }
 }

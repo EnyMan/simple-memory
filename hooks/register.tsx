@@ -3,7 +3,7 @@ import type { FsEntry, Register } from 'claude-code'
 
 import type { NoteRef } from '../types'
 import { bodyMatcher, keywords, parseStopwords, relevant, score, search } from './keywords'
-import { createIndexer, GUIDE } from './indexer'
+import { createIndexer, GUIDE, listNotes } from './indexer'
 import type { Note } from './indexer'
 import {
   checkKeywords,
@@ -101,7 +101,7 @@ export const register: Register = (on, options) => {
   const recentCount = Math.max(0, Math.floor(Number(options.recentNotes ?? 10)))
   const extra = parseStopwords(String(options.extraStopwords ?? ''))
 
-  const { index, forget } = createIndexer(extra)
+  const { index, isWarm, partial, cached, forget } = createIndexer(extra)
 
   const rootPath = (home: string, cwd: string): string => {
     let dir = directory
@@ -191,10 +191,19 @@ export const register: Register = (on, options) => {
     }
 
     if (recentCount > 0) {
-      const notes = await index(io, root)
-      const recent = [...notes].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, recentCount)
+      // Never wait for the first walk: until it completes, list files by mtime
+      // from the directory listings and name the ones not read yet by id.
+      const files = isWarm(root) ? await index(io, root) : await listNotes(io, root)
+      const recent = [...files].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, recentCount)
       if (recent.length > 0) {
-        parts.push('', `Recently updated notes (${notes.length} in total):`, ...recent.map(line))
+        parts.push(
+          '',
+          `Recently updated notes (${files.length} in total):`,
+          ...recent.map(file => {
+            const note = cached(file.abs)
+            return note ? line(note) : `- ${idOf(file.rel)}`
+          }),
+        )
       }
     }
 
@@ -628,6 +637,22 @@ export const register: Register = (on, options) => {
       description: 'Set up (or restructure) the simple-memory knowledge base with a short guided interview',
       argumentHint: '[what the knowledge base is for]',
     })
+    // Start the first walk now, in the background: nothing waits on it, and the
+    // first prompt hints from whatever it has read by then.
+    try {
+      const home = needsHome ? ((await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')) ?? '') : ''
+      const root = rootPath(home, needsCwd ? await $.session.cwd() : '')
+      void index(
+        {
+          exists: path => $.fs.exists(path),
+          list: path => $.fs.list(path),
+          read: async path => String(await $.fs.read(path)),
+        },
+        root,
+      ).catch(() => undefined)
+    } catch {
+      // The first prompt starts the walk instead.
+    }
     return next(e)
   })
 
@@ -813,7 +838,13 @@ export const register: Register = (on, options) => {
       },
     }
     const root = await rootOf(io)
-    const notes = await index(io, root).catch(() => [])
+    // Until the first walk completes, hint from what it has read so far.
+    let notes: Note[]
+    if (isWarm(root)) notes = await index(io, root).catch(() => [])
+    else {
+      void index(io, root).catch(() => undefined)
+      notes = partial(root)
+    }
     if (notes.length === 0) return next(e)
 
     const known = new Set([...(await read($, suggested)), ...(await read($, readNotes))].map(one => one.id))

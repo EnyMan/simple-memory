@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { keywords } from '../hooks/keywords'
@@ -21,13 +22,15 @@ const BAND_PROPS = {
 }
 
 /** An in-memory file system beneath the plugin. */
-const memoryFs = (on: On, files: Record<string, string> = {}) => {
+const memoryFs = (on: On, files: Record<string, string> = {}, gate?: Promise<void>, reads = { count: 0 }) => {
   const store = new Map(Object.entries(files))
   let tick = 1
   const mtimes = new Map([...store.keys()].map(path => [path, tick++]))
   const isDir = (path: string) => [...store.keys()].some(file => file.startsWith(`${path}/`))
 
-  on('fs.read', ($, e) => {
+  on('fs.read', async ($, e) => {
+    await gate
+    reads.count += 1
     const text = store.get(e.path)
     return text === undefined ? { deny: `ENOENT: ${e.path}` } : { value: text }
   })
@@ -64,6 +67,9 @@ const memoryFs = (on: On, files: Record<string, string> = {}) => {
   })
   return store
 }
+
+/** Waits for the plugin's first walk of the notes, as a tool call does. */
+const warmUp = ($: Engine) => $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: '' })
 
 /** The fields write_note requires beside title, folder and content. */
 const SCHEMA = { summary: 'What to check before a release.', keywords: ['release', 'checklist', 'ship'] }
@@ -127,6 +133,7 @@ describe('plugin', () => {
       contexts.push(e.context)
       return { text: e.text, context: e.context }
     })
+    await warmUp($)
 
     await $.prompt.submit({ text: 'Which database do we use for storage?', ...TYPED })
     const first = contexts[0]?.join('\n') ?? ''
@@ -374,6 +381,7 @@ describe('plugin', () => {
       contexts.push(e.context)
       return { text: e.text, context: e.context }
     })
+    await warmUp($)
 
     // "kubernetes" is only in a body: no hint.
     await $.prompt.submit({ text: 'Is our kubernetes cluster healthy?', ...TYPED })
@@ -391,5 +399,29 @@ describe('plugin', () => {
     // Frontmatter matches rank above body-only ones.
     const ranked = String((await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: 'postgres' })).result)
     expect(ranked.indexOf('decisions/use-postgres')).toBeLessThan(ranked.indexOf('people/jane'))
+  })
+
+  test('a prompt never waits for the first walk, which finishes in the background', OPTIONS, async ($, on) => {
+    let release = () => {}
+    const gate = new Promise<void>(resolve => (release = resolve))
+    const reads = { count: 0 }
+    memoryFs(on, NOTES, gate, reads)
+    const contexts: (readonly string[] | undefined)[] = []
+    on('prompt.submit', ($, e) => {
+      contexts.push(e.context)
+      return { text: e.text, context: e.context }
+    })
+
+    // Every read is held: the prompt still goes through, without a hint.
+    await $.prompt.submit({ text: 'Which database do we use for storage?', ...TYPED })
+    expect(contexts).toEqual([undefined])
+
+    // Once reads flow, the walk the prompt started completes on its own.
+    release()
+    await warmUp($)
+    await $.prompt.submit({ text: 'Which database do we use for storage?', ...TYPED })
+    expect(contexts[1]?.join('\n') ?? '').toContain('decisions/use-postgres')
+    // The 3 notes were read once, by that first walk: nothing read them again.
+    expect(reads.count).toBe(3)
   })
 })
