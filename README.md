@@ -57,13 +57,35 @@ Set these in `/config` or under `pluginConfigs["simple-memory"].options` in sett
 | `recentNotes` | `10` | Recently updated notes listed at session start. |
 | `extraStopwords` | `""` | More words to ignore, comma- or space-separated (handy for prompts in another language). |
 
-## Install / develop
+## Install
 
-```sh
-claude --plugin-dir /path/to/simple-memory         # load it for one session
-claude plugin validate /path/to/simple-memory      # check manifest and hooks
-claude plugin test /path/to/simple-memory          # run tests/*.test.ts
+The repository is its own plugin marketplace. In Claude Code:
+
+```
+/plugin marketplace add EnyMan/simple-memory
+/plugin install simple-memory@simple-memory
 ```
 
-Layout: `hooks/register.tsx` (hooks, tools, band, command), `hooks/keywords.ts` (stopwords, stemming,
-scoring), `hooks/notes.ts` (frontmatter and note edits), `types/index.d.ts` (session state contract).
+or from a shell:
+
+```sh
+claude plugin marketplace add EnyMan/simple-memory
+claude plugin install simple-memory@simple-memory
+```
+
+Then run `/memory-init` to set up the knowledge base. Options use their defaults until you change
+them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update later with
+`claude plugin marketplace update simple-memory` and `claude plugin update simple-memory@simple-memory`.
+
+## Develop
+
+```sh
+claude plugin marketplace add /path/to/simple-memory   # a folder marketplace: edits apply on /reload-plugins
+claude --plugin-dir /path/to/simple-memory             # or load it for one session, hot-reloading on save
+claude plugin validate /path/to/simple-memory          # check manifest and hooks
+claude plugin test /path/to/simple-memory              # run tests/*.test.ts
+```
+
+Layout: `hooks/register.tsx` (hooks, tools, band, command, nudge), `hooks/keywords.ts` (stopwords,
+stemming, scoring), `hooks/notes.ts` (frontmatter and note edits), `types/index.d.ts` (session state
+contract), `.claude-plugin/marketplace.json` (the marketplace listing this repo as one plugin).

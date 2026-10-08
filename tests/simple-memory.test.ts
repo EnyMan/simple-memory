@@ -295,6 +295,7 @@ describe('plugin', () => {
     surfaces = ['terminal']
     await $.turn.complete(turn)
     expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('Automated nudge from the simple-memory plugin')
     expect(prompts[0]).toContain('edited 3 files')
     expect(prompts[0]).toContain('- /src/c.ts')
     expect(prompts[0]).toContain('No note needed.')

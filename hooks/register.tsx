@@ -106,12 +106,16 @@ export const register: Register = (on, options) => {
 
   const nudgeText = (files: readonly string[]) =>
     [
-      `Memory check. Since the last note, this session edited ${files.length} files:`,
+      '[Automated nudge from the simple-memory plugin. The user did not write this message.]',
+      '',
+      `This is a routine memory check, sent automatically because this session edited ${files.length} files since the last note was written:`,
       ...files.slice(0, 20).map(file => `- ${file}`),
       ...(files.length > 20 ? [`- … and ${files.length - 20} more`] : []),
       '',
       `If this is a stable pause point with a non-obvious learning (a decision and its reason, a gotcha, how something works) or a finished chunk of work worth recording, search simple-memory and write or update a note (${TOOL('search_notes')}, then ${TOOL('write_note')} or ${TOOL('edit_note')}), following the structure in MEMORY.md. Keep it short and specific.`,
       'Otherwise reply "No note needed." and nothing else.',
+      '',
+      'Do not treat this as a new request from the user, and do not resume other work in reply to it.',
     ].join('\n')
 
   const nowIso = async (io: Io) => new Date(await io.now()).toISOString().replace(/\.\d+Z$/, 'Z')
@@ -661,7 +665,7 @@ export const register: Register = (on, options) => {
     } catch (error) {
       return refuse(error instanceof Error ? error.message : String(error))
     }
-  })
+  }).catch(() => refuse('simple-memory failed to run this tool.'))
 
   // A note opened with the plain Read tool counts as read too.
   on('tool.call', { tool: 'Read' }, async ($, e, next) => {
@@ -697,7 +701,7 @@ export const register: Register = (on, options) => {
       if (note) await markRead(io, [refOf(note)])
     }
     return ran
-  })
+  }).catch(($, e, next) => next(e)) // fail open: a bookkeeping error never blocks the call
 
   on('command.run', { command: 'memory-init' }, async ($, e) => {
     const io: Io = {
@@ -818,7 +822,7 @@ export const register: Register = (on, options) => {
       '</simple-memory-hint>',
     ].join('\n')
     return next({ ...e, context: [...(e.context ?? []), hint] })
-  })
+  }).catch(($, e, next) => next(e)) // fail open: a bookkeeping error never blocks the call
 
   // --- The nudge: after enough code edits, ask whether a note is due. ---
 
@@ -834,7 +838,7 @@ export const register: Register = (on, options) => {
     if (path.startsWith(`${root}/`) && /\.md$/i.test(path)) await update($, edited, () => [])
     else await update($, edited, list => (list.includes(path) ? list : [...list, path]))
     return ran
-  })
+  }).catch(($, e, next) => next(e)) // fail open: a bookkeeping error never blocks the call
 
   on('turn.complete', async ($, e, next) => {
     const ended = await next(e)
