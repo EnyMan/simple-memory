@@ -3,15 +3,13 @@ import type { FsEntry, Register } from 'claude-code'
 
 import type { NoteRef } from '../types'
 import { keywords, parseStopwords, relevant, score, terms } from './keywords'
-import type { Indexed } from './keywords'
+import { createIndexer, GUIDE } from './indexer'
+import type { Note } from './indexer'
 import { findReplace, idOf, linksTo, parse, relink, replaceSection, safeRelative, serialize, slugify, snippet, tidyTags } from './notes'
 import type { Parsed } from './notes'
 
-
 const PLUGIN = 'simple-memory'
 const TOOL = (name: string) => `mcp__${PLUGIN}__${name}`
-const GUIDE = 'MEMORY.md'
-const MAX_FILES = 5000
 const MIN_HINT_SCORE = 1.5
 
 const suggested = atom({ plugin: 'simple-memory', key: 'suggested' } as const, [])
@@ -23,16 +21,6 @@ const EDIT_TOOLS = /^(Edit|Write|MultiEdit|NotebookEdit)$/
 /** simple-memory tools that count as writing a note. */
 const NOTE_TOOLS = new Set(['write_note', 'edit_note', 'move_note', 'init_memory'].map(name => `mcp__simple-memory__${name}`))
 
-type Note = Indexed & {
-  id: string
-  rel: string
-  abs: string
-  title: string
-  tags: string[]
-  updated: string
-  mtimeMs: number
-  body: string
-}
 
 type Args = Record<string, unknown>
 
@@ -88,8 +76,7 @@ export const register: Register = (on, options) => {
   const recentCount = Math.max(0, Math.floor(Number(options.recentNotes ?? 10)))
   const extra = parseStopwords(String(options.extraStopwords ?? ''))
 
-  // Parsed notes by absolute path, re-read only when a file's mtime moves.
-  const cache = new Map<string, Note>()
+  const { index, forget } = createIndexer(extra)
 
   const rootPath = (home: string, cwd: string): string => {
     let dir = directory
@@ -120,62 +107,6 @@ export const register: Register = (on, options) => {
 
   const nowIso = async (io: Io) => new Date(await io.now()).toISOString().replace(/\.\d+Z$/, 'Z')
 
-  const buildNote = (abs: string, rel: string, mtimeMs: number, text: string): Note => {
-    const id = idOf(rel)
-    const { meta, body } = parse(text, id.split('/').pop() ?? id)
-    const bodyTerms = new Map<string, number>()
-    for (const term of terms(body.slice(0, 50_000), extra)) bodyTerms.set(term, (bodyTerms.get(term) ?? 0) + 1)
-    return {
-      id,
-      rel,
-      abs,
-      title: meta.title,
-      tags: meta.tags,
-      updated: meta.updated ?? meta.created ?? '',
-      mtimeMs,
-      body,
-      titleTerms: new Set(terms(meta.title, extra)),
-      tagTerms: new Set(meta.tags.flatMap(tag => terms(tag.replace(/[-_/]/g, ' '), extra))),
-      pathTerms: new Set(terms(id.replace(/[-_/]/g, ' '), extra)),
-      bodyTerms,
-    }
-  }
-
-  /** Every note under the root, from the cache where the file has not changed. */
-  const index = async (io: Io, root: string): Promise<Note[]> => {
-    if (!(await io.exists(root))) return []
-    const notes: Note[] = []
-    const seen = new Set<string>()
-    const queue = ['']
-    while (queue.length > 0 && notes.length < MAX_FILES) {
-      const dir = queue.shift()!
-      const entries = await io.list(dir === '' ? root : `${root}/${dir}`).catch(() => [])
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue
-        const rel = dir === '' ? entry.name : `${dir}/${entry.name}`
-        if (entry.kind === 'dir') {
-          queue.push(rel)
-          continue
-        }
-        if (entry.kind !== 'file' || !/\.md$/i.test(entry.name) || rel === GUIDE) continue
-        const abs = `${root}/${rel}`
-        seen.add(abs)
-        const cached = cache.get(abs)
-        if (cached && cached.mtimeMs === entry.mtimeMs) {
-          notes.push(cached)
-          continue
-        }
-        const text = await io.read(abs).catch(() => undefined)
-        if (typeof text !== 'string') continue
-        const note = buildNote(abs, rel, entry.mtimeMs, text)
-        cache.set(abs, note)
-        notes.push(note)
-      }
-    }
-    for (const key of [...cache.keys()]) if (key.startsWith(`${root}/`) && !seen.has(key)) cache.delete(key)
-    return notes
-  }
-
   /** A note by id, path (with or without `.md`) or title, case-insensitive. */
   const find = (notes: readonly Note[], query: string, root: string): Note | undefined => {
     let wanted = query.trim().replace(/^\[\[|\]\]$/g, '').replace(/\\/g, '/')
@@ -196,7 +127,7 @@ export const register: Register = (on, options) => {
   const saveNote = async (io: Io, root: string, rel: string, parsed: Parsed) => {
     const abs = `${root}/${rel}`
     await io.write(abs, serialize(parsed))
-    cache.delete(abs)
+    forget(abs)
   }
 
   // --- The opening context: rules, the structure guide, recent notes. ---
@@ -525,7 +456,7 @@ export const register: Register = (on, options) => {
     await saveNote(io, root, rel, { meta: { ...parsed.meta, title, updated: await nowIso(io) }, body: parsed.body })
     if (rel !== note.rel) {
       await io.remove(note.abs)
-      cache.delete(note.abs)
+      forget(note.abs)
     }
 
     const relinked: string[] = []
@@ -535,7 +466,7 @@ export const register: Register = (on, options) => {
         const text = await io.read(other.abs).catch(() => undefined)
         if (text === undefined) continue
         await io.write(other.abs, relink(text, note.id, id))
-        cache.delete(other.abs)
+        forget(other.abs)
         relinked.push(other.id)
       }
     }
@@ -551,7 +482,7 @@ export const register: Register = (on, options) => {
     const note = find(notes, str(args.note), root)
     if (!note) return refuse(`no note "${str(args.note)}". Search for it first.`)
     await io.remove(note.abs)
-    cache.delete(note.abs)
+    forget(note.abs)
     await io.forget(note.id)
     const linking = notes.filter(other => other.abs !== note.abs && linksTo(other.body, note.id)).map(other => other.id)
     return answer(
