@@ -29,8 +29,8 @@ them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update
 
 | Piece | Behaviour |
 | --- | --- |
-| **Keyword hints** | On every prompt, the prompt is reduced to keywords (common words like *is*, *a*, *and*, *the* and filler like *please*/*help* are removed, and words are lightly stemmed). The keywords are scored against each note's title, tags, folder path and body, weighted by how rare each word is. Up to 5 matching notes are attached to the prompt as a hidden `<simple-memory-hint>`. A note is suggested at most once per conversation, and notes already read are never suggested. |
-| **Tools** | `mcp__simple-memory__search_notes`, `read_note`, `write_note`, `edit_note` (append / prepend / find_replace / replace_section / replace_body, plus title and tags), `move_note` (to a folder, or a new id; `[[links]]` in other notes are rewritten), `delete_note` (reports notes still linking to it) and `init_memory`. |
+| **Keyword hints** | On every prompt, the prompt is reduced to keywords (common words like *is*, *a*, *and*, *the* and filler like *please*/*help* are removed, and words are lightly stemmed). The keywords are scored against each note's frontmatter (keywords, title, tags, summary) and folder path, not its body, weighted by how rare each word is. Up to 5 matching notes are attached to the prompt as a hidden `<simple-memory-hint>`, each with its summary. A note is suggested at most once per conversation, and notes already read are never suggested. |
+| **Tools** | `mcp__simple-memory__search_notes` (frontmatter and full text), `read_note`, `write_note` (requires a summary and keywords), `edit_note` (append / prepend / find_replace / replace_section / replace_body, plus title, summary, keywords and tags), `move_note` (to a folder, or a new id; `[[links]]` in other notes are rewritten), `delete_note` (reports notes still linking to it) and `init_memory`. |
 | **Band** | A row above the prompt lists this conversation's notes: read notes first (`●`), then suggested ones not read yet (`○`). Clicking a note inserts `[[note-id]]` into the prompt. |
 | **Session start** | The conversation's opening context gets the usage rules, the structure guide (`MEMORY.md`) and the most recently updated notes. |
 | **Memory nudge** | Edits made with Edit, Write, MultiEdit and NotebookEdit are tracked as a set of distinct files. When a main-session turn ends with a normal answer and 3+ files have been edited since the last note, the plugin starts one follow-up turn asking Claude whether there is a non-obvious learning or a finished chunk worth recording, and to reply "No note needed." otherwise. Never in headless (`-p`/SDK) runs, after subagent turns, or after interrupted or failed turns. Writing, editing or moving a note (or editing a note file directly) resets the count. The count survives plugin reloads and resets on `/clear`. Bash, research and reading don't count. |
@@ -53,7 +53,9 @@ Windows), since the plugin API has no file delete.
 ```markdown
 ---
 title: Use Postgres
-tags: [database, backend]
+summary: Why we chose Postgres over MySQL for the main store.
+keywords: [postgres, database, mysql, jsonb, storage]
+tags: [decision, backend]
 created: 2026-10-05T12:00:00Z
 updated: 2026-10-05T12:00:00Z
 ---
@@ -61,9 +63,26 @@ updated: 2026-10-05T12:00:00Z
 We chose Postgres over MySQL for JSONB support. See [[how-to/deploy-backend]].
 ```
 
+Every note has a `title`, a one-line `summary` and 3 to 12 `keywords`; `write_note` refuses a note
+without them, and `edit_note` can update them. The per-prompt hints match only on this frontmatter
+(plus the folder path), which keeps the index small; `search_notes` also searches the full text.
+Notes from before the schema still work: their headings stand in for keywords and their first
+paragraph for the summary, and `search_notes` flags them so Claude can fill the fields in.
+
 A note's id is its path under the root without `.md`. The tools accept an id, a path, a `[[link]]`
 or the exact title. Files and folders whose names start with `.` are ignored. Because notes are
 plain files, the folder can be a git repository that a team shares.
+
+## Performance
+
+Measured with `bun bench/run.ts` on synthetic knowledge bases (median, through Claude Code's plugin
+engine; full results and method in [bench/README.md](bench/README.md)):
+
+| | 100 notes | 1,000 notes | 5,000 notes |
+| --- | ---: | ---: | ---: |
+| First prompt of a session (index built from scratch) | 85 ms | 648 ms | 1.8 s |
+| Later prompts | 24 ms | 76 ms | 216 ms |
+| `search_notes` (frontmatter + full text) | 22 ms | 83 ms | 308 ms |
 
 ## Options
 

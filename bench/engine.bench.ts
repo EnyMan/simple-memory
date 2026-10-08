@@ -109,5 +109,13 @@ for (const n of SIZES) {
       changed.push(await time(PROMPTS[i % 4]!))
     }
     report(n, 'engine: prompt after one note changed', changed)
+
+    const searching: number[] = []
+    for (let i = 0; i < WARM_RUNS; i++) {
+      const start = performance.now()
+      await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: PROMPTS[i % 4]! })
+      searching.push(performance.now() - start)
+    }
+    report(n, 'engine: search_notes (warm index)', searching)
   })
 }
