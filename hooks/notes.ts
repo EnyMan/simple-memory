@@ -14,7 +14,8 @@ export type Meta = {
   rest: [string, string][]
 }
 
-export type Parsed = { meta: Meta; body: string }
+/** A note split up; `eol` is the line ending its file used (Windows' `\r\n` kept on save), `\n` when absent. */
+export type Parsed = { meta: Meta; body: string; eol?: '\n' | '\r\n' }
 
 const FRONT = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/
 
@@ -42,7 +43,10 @@ const readList = (value: string, lines: readonly string[], i: number): { items: 
 }
 
 /** Splits a note into frontmatter and body; a missing title falls back to the first heading or `fallback`. */
-export const parse = (text: string, fallback: string): Parsed => {
+export const parse = (raw: string, fallback: string): Parsed => {
+  // Work on \n line endings throughout; serialize puts the file's own back.
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const text = eol === '\r\n' ? raw.replace(/\r\n/g, '\n') : raw
   const meta: Meta = { title: '', keywords: [], tags: [], rest: [] }
   let body = text
   const front = FRONT.exec(text)
@@ -71,12 +75,12 @@ export const parse = (text: string, fallback: string): Parsed => {
     meta.title = /^#\s+(.+)$/m.exec(body)?.[1]?.trim() ?? fallback
   }
 
-  return { meta, body }
+  return { meta, body, eol }
 }
 
 const quote = (value: string) => (/^[\w][\w .,()/&+-]*$/.test(value) && !/:\s/.test(value) ? value : JSON.stringify(value))
 
-export const serialize = ({ meta, body }: Parsed): string => {
+export const serialize = ({ meta, body, eol = '\n' }: Parsed): string => {
   const lines = [`title: ${quote(meta.title)}`]
   if (meta.summary) lines.push(`summary: ${quote(meta.summary)}`)
   if (meta.keywords.length > 0) lines.push(`keywords: [${meta.keywords.map(quote).join(', ')}]`)
@@ -85,7 +89,8 @@ export const serialize = ({ meta, body }: Parsed): string => {
   if (meta.updated) lines.push(`updated: ${meta.updated}`)
   for (const [key, value] of meta.rest) lines.push(`${key}: ${value}`)
   const text = body.replace(/^\n+/, '')
-  return `---\n${lines.join('\n')}\n---\n\n${text.endsWith('\n') ? text : text + '\n'}`
+  const out = `---\n${lines.join('\n')}\n---\n\n${text.endsWith('\n') ? text : text + '\n'}`
+  return eol === '\r\n' ? out.replace(/\r?\n/g, '\r\n') : out
 }
 
 export const slugify = (title: string): string =>
