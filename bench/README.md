@@ -44,7 +44,39 @@ Median / p95 in ms. Intel Xeon @ 2.80 GHz (4 threads), 16 GB, Linux 6.18, Bun 1.
 Claude Code 2.1.289. One run of each cold measurement through the engine. The dispatch floor's
 p95 is its first call warming up; the median is the steady state.
 
-### Current: frontmatter-only index ([#3](https://github.com/EnyMan/simple-memory/issues/3))
+### Current: first walk in the background ([#4](https://github.com/EnyMan/simple-memory/issues/4))
+
+The first walk starts at `session.start` and nothing waits for it: until it completes, the
+per-prompt hint scores whatever it has read so far, and the opening context lists recent notes
+from the directory listings alone. Tools that need the full index join the walk in progress. Walks
+are shared by concurrent callers, and a walk reads changed notes 16 at a time.
+
+Intel Xeon @ 2.10 GHz (4 threads). This is a slower machine than the earlier runs, so compare rows
+within a table rather than across tables.
+
+| measurement | 100 notes | 1,000 notes | 5,000 notes |
+| --- | ---: | ---: | ---: |
+| disk: index, cold (parse every note) | 10.8 / 28.2 | 91.9 / 101 | 426 / 444 |
+| disk: index, warm (walk + stat only) | 4.99 / 6.56 | 41.1 / 49.9 | 155 / 183 |
+| disk: index, one note changed | 5.35 / 7.29 | 42.5 / 49.3 | 162 / 173 |
+| scoring: keywords + relevant() (frontmatter) | 0.07 / 0.19 | 2.07 / 2.75 | 9.20 / 18.9 |
+| search: frontmatter + full text over all notes | 3.90 / 6.28 | 42.0 / 68.5 | 187 / 306 |
+| disk: whole hint path, warm | 5.78 / 7.23 | 42.8 / 63.2 | 170 / 235 |
+| engine: no-keyword prompt (dispatch floor) | 0.93 / 185 | 0.41 / 91.4 | 0.42 / 85.7 |
+| engine: first prompt (walk runs in background) | 6.34 | 1.74 | 1.34 |
+| engine: first walk, until complete (background) | 133 | 659 | 1400 |
+| engine: later prompt (warm index) | 20.3 / 43.0 | 82.5 / 129 | 171 / 249 |
+| engine: prompt after one note changed | 16.5 / 22.9 | 60.3 / 93.8 | 169 / 239 |
+| engine: search_notes (warm index) | 19.2 / 26.9 | 98.4 / 119 | 259 / 365 |
+
+- **The first prompt no longer waits: 1.8 s → about 1 ms at 5,000 notes.** Its hint covers only
+  the notes read by then (none, if it arrives right after the session starts); later prompts get
+  full hints once the walk completes.
+- **The background walk completes in 1.4 s at 5,000 notes** (659 ms at 1,000). Reading 16 notes at
+  a time roughly halved the cold disk index (956 → 426 ms at 5,000), though the machines differ.
+- Warm prompts are still bound by the folder walk; see [#5](https://github.com/EnyMan/simple-memory/issues/5).
+
+### Frontmatter-only index ([#3](https://github.com/EnyMan/simple-memory/issues/3))
 
 The hint indexes only each note's frontmatter (title, summary, keywords, tags) and its path.
 Bodies are kept as text and scanned by `search_notes` when it is called.
@@ -101,6 +133,5 @@ What it showed:
 
 ## Next
 
-- [#4](https://github.com/EnyMan/simple-memory/issues/4): build the index in the background, so the first prompt never waits for it.
 - [#5](https://github.com/EnyMan/simple-memory/issues/5): make the corpus's folder layout realistic, re-measure, and decide whether a persisted,
   mtime-checked index cache is worth adding.

@@ -80,9 +80,12 @@ engine; full results and method in [bench/README.md](bench/README.md)):
 
 | | 100 notes | 1,000 notes | 5,000 notes |
 | --- | ---: | ---: | ---: |
-| First prompt of a session (index built from scratch) | 85 ms | 648 ms | 1.8 s |
-| Later prompts | 24 ms | 76 ms | 216 ms |
-| `search_notes` (frontmatter + full text) | 22 ms | 83 ms | 308 ms |
+| First prompt of a session (the index builds in the background) | 6 ms | 2 ms | 1 ms |
+| Background index build, until complete | 133 ms | 659 ms | 1.4 s |
+| Later prompts | 20 ms | 83 ms | 171 ms |
+| `search_notes` (frontmatter + full text) | 19 ms | 98 ms | 259 ms |
+
+Until the background build completes, hints cover only the notes read so far.
 
 ## Options
 

@@ -86,9 +86,14 @@ for (const n of SIZES) {
     for (let i = 0; i < WARM_RUNS; i++) floor.push(await time('ok thanks'))
     report(n, 'engine: no-keyword prompt (dispatch floor)', floor)
 
+    // The first prompt starts the first walk and returns without waiting for it;
+    // a tool call then joins that walk, so its end marks the walk's completion.
     const before = { ...calls }
+    const walkStart = performance.now()
     const cold = [await time(PROMPTS[0]!)]
-    report(n, 'engine: first prompt (cold index)', cold, {
+    report(n, 'engine: first prompt (walk runs in background)', cold)
+    await $.tool.call({ tool: 'mcp__simple-memory__search_notes', query: '' })
+    report(n, 'engine: first walk, until complete (background)', [performance.now() - walkStart], {
       list: calls.list - before.list,
       read: calls.read - before.read,
     })
