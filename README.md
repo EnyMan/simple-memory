@@ -5,6 +5,26 @@ A Claude Code mod that gives Claude a local, plain-markdown knowledge base, a li
 semantic search. Everything runs inside Claude Code as function hooks: there's no server, no
 database and no embeddings.
 
+## Install
+
+The repository is its own plugin marketplace. In Claude Code:
+
+```
+/plugin marketplace add EnyMan/simple-memory
+/plugin install simple-memory@simple-memory
+```
+
+or from a shell:
+
+```sh
+claude plugin marketplace add EnyMan/simple-memory
+claude plugin install simple-memory@simple-memory
+```
+
+Then run `/memory-init` to set up the knowledge base. Options use their defaults until you change
+them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update later with
+`claude plugin marketplace update simple-memory` and `claude plugin update simple-memory@simple-memory`.
+
 ## What it does
 
 | Piece | Behaviour |
@@ -56,26 +76,6 @@ Set these in `/config` or under `pluginConfigs["simple-memory"].options` in sett
 | `nudgeAfterFiles` | `3` | Distinct edited files before the memory nudge (`0` turns it off). |
 | `recentNotes` | `10` | Recently updated notes listed at session start. |
 | `extraStopwords` | `""` | More words to ignore, comma- or space-separated (handy for prompts in another language). |
-
-## Install
-
-The repository is its own plugin marketplace. In Claude Code:
-
-```
-/plugin marketplace add EnyMan/simple-memory
-/plugin install simple-memory@simple-memory
-```
-
-or from a shell:
-
-```sh
-claude plugin marketplace add EnyMan/simple-memory
-claude plugin install simple-memory@simple-memory
-```
-
-Then run `/memory-init` to set up the knowledge base. Options use their defaults until you change
-them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update later with
-`claude plugin marketplace update simple-memory` and `claude plugin update simple-memory@simple-memory`.
 
 ## Develop
 
