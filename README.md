@@ -25,6 +25,9 @@ Then run `/memory-init` to set up the knowledge base. Options use their defaults
 them with `/plugin configure simple-memory@simple-memory` (or `/config`). Update later with
 `claude plugin marketplace update simple-memory` and `claude plugin update simple-memory@simple-memory`.
 
+Coming from basic-memory with an existing vault? See
+[Migrating from basic-memory](docs/migrating-from-basic-memory.md).
+
 ## What it does
 
 | Piece | Behaviour |
