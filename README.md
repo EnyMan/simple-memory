@@ -3,7 +3,9 @@
 A Claude Code mod that gives Claude a local, plain-markdown knowledge base, a lightweight take on
 [basic-memory](https://github.com/basicmachines-co/basic-memory) without the cloud sync and without
 semantic search. Everything runs inside Claude Code as function hooks: there's no server, no
-database and no embeddings.
+database, and no embeddings.
+
+This opinionated way of how I found sharing and storing notes to be most useful for me, it might not be for everyone.
 
 ## Install
 
